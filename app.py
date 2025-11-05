@@ -12,14 +12,16 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
+import numpy as np
 import requests
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +32,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Environment helpers
+def _get_env_float(name: str, default: str) -> float:
+    """Safely parse a float environment variable with fallback."""
+    value = os.getenv(name, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid float for %s='%s'. Falling back to %s", name, value, default)
+        return float(default)
 
 # Configuration
 class Config:
@@ -45,6 +57,14 @@ class Config:
     
     # API settings
     REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "10"))
+
+    # Strategy filters security and thresholds
+    STRATEGY_FILTERS_TOKEN: str = os.getenv("STRATEGY_FILTERS_TOKEN", "")
+    STRATEGY_RANGE_MIN_FACTOR: float = _get_env_float("STRATEGY_RANGE_MIN_FACTOR", "0.003")
+    STRATEGY_ADX_MIN: float = _get_env_float("STRATEGY_ADX_MIN", "25")
+    STRATEGY_ATR_MIN_FACTOR: float = _get_env_float("STRATEGY_ATR_MIN_FACTOR", "0.004")
+    STRATEGY_VOLUME_MIN_RATIO: float = _get_env_float("STRATEGY_VOLUME_MIN_RATIO", "1.0")
+    STRATEGY_ATR_BOX_MULTIPLIER: float = _get_env_float("STRATEGY_ATR_BOX_MULTIPLIER", "1.0")
     
     # Validate critical settings
     @classmethod
@@ -179,6 +199,280 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Security & Indicator Utilities
+strategy_security = HTTPBearer(auto_error=False)
+
+
+async def authorize_strategy_access(
+    credentials: HTTPAuthorizationCredentials = Security(strategy_security)
+) -> None:
+    """Validate bearer token access for strategy endpoints."""
+    if not Config.STRATEGY_FILTERS_TOKEN:
+        logger.error("Strategy filters token not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="Strategy filters access token is not configured"
+        )
+
+    if credentials is None or (credentials.scheme or "").lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Bearer token required")
+
+    if not hmac.compare_digest(credentials.credentials, Config.STRATEGY_FILTERS_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+def _round_float(value: Optional[float], decimals: int = 4) -> Optional[float]:
+    """Round floats safely, returning None for missing values."""
+    if value is None:
+        return None
+    try:
+        if np.isnan(value):
+            return None
+    except TypeError:
+        pass
+    return round(float(value), decimals)
+
+
+def resolution_to_seconds(resolution: str) -> int:
+    """Convert Delta Exchange resolution string to seconds."""
+    value = (resolution or "").strip().lower()
+    if not value:
+        raise ValueError("Resolution is required")
+
+    unit = value[-1]
+    amount_str = value[:-1]
+    try:
+        amount = int(amount_str)
+    except ValueError as exc:
+        raise ValueError(f"Invalid resolution: {resolution}") from exc
+
+    if unit == "s":
+        base = 1
+    elif unit == "m":
+        base = 60
+    elif unit == "h":
+        base = 3600
+    elif unit == "d":
+        base = 86400
+    else:
+        raise ValueError(f"Unsupported resolution unit: {resolution}")
+
+    return amount * base
+
+
+def fetch_candles_dataframe(resolution: str, limit: int) -> pd.DataFrame:
+    """Fetch candle data and return a cleaned DataFrame."""
+    interval_seconds = resolution_to_seconds(resolution)
+    end_time = int(time.time())
+    buffer = max(5, int(limit * 0.1))  # add buffer to mitigate partial candles
+    start_time = end_time - (limit + buffer) * interval_seconds
+
+    params = {
+        "resolution": resolution,
+        "symbol": Config.SYMBOL,
+        "start": start_time,
+        "end": end_time
+    }
+    query = "&".join([f"{key}={value}" for key, value in params.items()])
+    url = f"{Config.BASE_URL}/v2/history/candles?{query}"
+
+    data = safe_api_request(url)
+    candles = data.get("result", [])
+
+    if not candles:
+        raise HTTPException(status_code=502, detail="No candle data returned from exchange")
+
+    df = pd.DataFrame(candles)
+    required_columns = {"open", "high", "low", "close", "volume", "time"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Candle data missing columns: {', '.join(sorted(missing_columns))}"
+        )
+
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.dropna(subset=numeric_columns)
+
+    if df.empty:
+        raise HTTPException(status_code=502, detail="No valid candle rows after cleansing")
+
+    df = df.sort_values("time").reset_index(drop=True)
+    if len(df) > limit:
+        df = df.tail(limit).reset_index(drop=True)
+
+    return df
+
+
+def calculate_true_range(df: pd.DataFrame) -> pd.Series:
+    """Calculate True Range series."""
+    prev_close = df["close"].shift(1)
+    ranges = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs()
+    ], axis=1, join="outer")
+    true_range = ranges.max(axis=1)
+    return true_range.fillna(0)
+
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Average True Range."""
+    true_range = calculate_true_range(df)
+    atr = true_range.ewm(alpha=1 / period, adjust=False).mean()
+    return atr
+
+
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Average Directional Movement Index."""
+    high = df["high"]
+    low = df["low"]
+
+    up_move = high.diff()
+    down_move = low.diff() * -1
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    plus_dm = pd.Series(plus_dm, index=df.index)
+    minus_dm = pd.Series(minus_dm, index=df.index)
+
+    atr = calculate_atr(df, period)
+    atr_replace = atr.replace(0, np.nan)
+
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_replace
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_replace
+
+    di_sum = plus_di + minus_di
+    di_diff = (plus_di - minus_di).abs()
+
+    dx = (di_diff / di_sum.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan) * 100
+    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+    return adx.fillna(0)
+
+
+def compute_strategy_filters(resolution: Optional[str] = None) -> Dict[str, Any]:
+    """Compute strategy filters and indicators for the latest candle."""
+    primary_resolution = (resolution or Config.RESOLUTION or "15m").lower()
+    primary_limit = max(220, 14 * 5)
+
+    df_primary = fetch_candles_dataframe(primary_resolution, primary_limit)
+
+    if df_primary.empty or len(df_primary) < 50:
+        raise HTTPException(status_code=502, detail="Insufficient primary candle data")
+
+    last_row = df_primary.iloc[-1]
+    last_close = float(last_row["close"])
+    last_high = float(last_row["high"])
+    last_low = float(last_row["low"])
+    last_volume = float(last_row["volume"])
+    candle_time = last_row["time"].isoformat()
+
+    range_value = last_high - last_low
+
+    atr_series = calculate_atr(df_primary, 14)
+    atr_value = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else None
+
+    adx_series = calculate_adx(df_primary, 14)
+    adx_value = float(adx_series.iloc[-1]) if not np.isnan(adx_series.iloc[-1]) else None
+
+    volume_sma = df_primary["volume"].rolling(window=20, min_periods=20).mean()
+    volume_sma_value = volume_sma.iloc[-1]
+    if pd.isna(volume_sma_value):
+        volume_sma_value = None
+
+    volume_ratio = (last_volume / volume_sma_value) if volume_sma_value else None
+
+    df_trend = fetch_candles_dataframe("1h", 220)
+    if df_trend.empty or len(df_trend) < 200:
+        sma50_value = None
+        sma200_value = None
+    else:
+        sma50_series = df_trend["close"].rolling(window=50, min_periods=50).mean()
+        sma200_series = df_trend["close"].rolling(window=200, min_periods=200).mean()
+        sma50_value = sma50_series.iloc[-1] if not pd.isna(sma50_series.iloc[-1]) else None
+        sma200_value = sma200_series.iloc[-1] if not pd.isna(sma200_series.iloc[-1]) else None
+
+    if sma50_value is None or sma200_value is None:
+        trend_direction = "unknown"
+        trend_ok = False
+    elif sma50_value > sma200_value:
+        trend_direction = "bullish"
+        trend_ok = True
+    elif sma50_value < sma200_value:
+        trend_direction = "bearish"
+        trend_ok = False
+    else:
+        trend_direction = "neutral"
+        trend_ok = False
+
+    atr_multiplier = Config.STRATEGY_ATR_BOX_MULTIPLIER
+    if atr_value is not None:
+        suggested_high = last_close + atr_value * atr_multiplier
+        suggested_low = last_close - atr_value * atr_multiplier
+    else:
+        suggested_high = None
+        suggested_low = None
+
+    range_ok = bool(
+        range_value and last_close and range_value >= last_close * Config.STRATEGY_RANGE_MIN_FACTOR
+    )
+    adx_ok = bool(adx_value and adx_value >= Config.STRATEGY_ADX_MIN)
+    atr_ok = bool(
+        atr_value and last_close and atr_value >= last_close * Config.STRATEGY_ATR_MIN_FACTOR
+    )
+    volume_ok = bool(
+        volume_ratio and volume_ratio >= Config.STRATEGY_VOLUME_MIN_RATIO
+    )
+
+    filters = {
+        "range_ok": range_ok,
+        "adx_ok": adx_ok,
+        "atr_ok": atr_ok,
+        "volume_ok": volume_ok,
+        "trend_ok": trend_ok
+    }
+    filters_passed = all(filters.values())
+
+    result = {
+        "symbol": Config.SYMBOL,
+        "resolution": primary_resolution,
+        "candle_time": candle_time,
+        "range": {
+            "value": _round_float(range_value, 2),
+            "high": _round_float(last_high, 2),
+            "low": _round_float(last_low, 2)
+        },
+        "adx_14": _round_float(adx_value, 2),
+        "atr_14": _round_float(atr_value, 2),
+        "volume_vs_sma20": {
+            "current_volume": _round_float(last_volume, 2),
+            "sma20": _round_float(volume_sma_value, 2),
+            "ratio": _round_float(volume_ratio, 2)
+        },
+        "one_hour_trend": {
+            "sma50": _round_float(sma50_value, 2),
+            "sma200": _round_float(sma200_value, 2),
+            "direction": trend_direction
+        },
+        "atr_box": {
+            "upper": _round_float(suggested_high, 2),
+            "lower": _round_float(suggested_low, 2),
+            "multiplier": _round_float(atr_multiplier, 2)
+        },
+        "filters": {**filters, "filters_passed": filters_passed},
+        "filters_passed": filters_passed,
+        "data_source": "delta_exchange",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    return result
 
 # API Routes
 
@@ -403,6 +697,22 @@ async def get_strategy_filters():
     except Exception as e:
         logger.error(f"Error in strategy filters: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get strategy filters: {str(e)}")
+
+
+@app.get("/api/strategy/filters")
+async def get_strategy_filters_secure(_: None = Security(authorize_strategy_access)):
+    """Secure endpoint delivering production strategy filters."""
+    try:
+        payload = compute_strategy_filters()
+        return JSONResponse(payload)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.error(f"Invalid request for strategy filters: {exc}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error computing strategy filters: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to compute strategy filters")
 
 # Legacy endpoint
 @app.get("/strategy-filters")
