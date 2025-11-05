@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import requests
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -179,6 +180,163 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+# Technical Indicator Functions
+
+def calculate_sma(data: pd.Series, period: int) -> pd.Series:
+    """
+    Calculate Simple Moving Average
+    
+    Args:
+        data: Price series
+        period: SMA period
+    
+    Returns:
+        SMA series
+    """
+    return data.rolling(window=period, min_periods=period).mean()
+
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calculate Average True Range (ATR)
+    
+    Args:
+        high: High prices
+        low: Low prices
+        close: Close prices
+        period: ATR period (default 14)
+    
+    Returns:
+        ATR series
+    """
+    # Calculate True Range
+    high_low = high - low
+    high_close = np.abs(high - close.shift())
+    low_close = np.abs(low - close.shift())
+    
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    
+    # Calculate ATR using exponential moving average
+    atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    return atr
+
+def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calculate Average Directional Index (ADX)
+    
+    Args:
+        high: High prices
+        low: Low prices
+        close: Close prices
+        period: ADX period (default 14)
+    
+    Returns:
+        ADX series
+    """
+    # Calculate +DM and -DM
+    high_diff = high.diff()
+    low_diff = -low.diff()
+    
+    pos_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
+    neg_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
+    
+    # Calculate True Range
+    high_low = high - low
+    high_close = np.abs(high - close.shift())
+    low_close = np.abs(low - close.shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    
+    # Smooth using Wilder's method (exponential moving average)
+    atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
+    pos_di = 100 * pos_dm.ewm(span=period, adjust=False, min_periods=period).mean() / atr
+    neg_di = 100 * neg_dm.ewm(span=period, adjust=False, min_periods=period).mean() / atr
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(pos_di - neg_di) / (pos_di + neg_di)
+    adx = dx.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    return adx
+
+def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.DataFrame:
+    """
+    Fetch candle data from Delta Exchange and return as DataFrame
+    
+    Args:
+        symbol: Trading symbol
+        resolution: Candle resolution (e.g., '15m', '1h')
+        limit: Number of candles to fetch
+    
+    Returns:
+        DataFrame with OHLCV data
+    
+    Raises:
+        HTTPException: On request failure
+    """
+    try:
+        # Calculate time range
+        end_time = int(time.time())
+        
+        # Convert resolution to seconds
+        resolution_map = {
+            '1m': 60, '3m': 180, '5m': 300, '15m': 900,
+            '30m': 1800, '1h': 3600, '2h': 7200, '4h': 14400,
+            '1d': 86400
+        }
+        
+        seconds_per_candle = resolution_map.get(resolution, 900)
+        start_time = end_time - (limit * seconds_per_candle)
+        
+        url = f"{Config.BASE_URL}/v2/history/candles"
+        params = {
+            "resolution": resolution,
+            "symbol": symbol,
+            "start": start_time,
+            "end": end_time
+        }
+        
+        full_url = f"{url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+        data = safe_api_request(full_url)
+        
+        candles = data.get("result", [])
+        
+        if not candles or len(candles) == 0:
+            raise HTTPException(status_code=404, detail="No candle data available")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(candles)
+        
+        # Rename columns to standard OHLCV format
+        column_map = {
+            'time': 'timestamp',
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'volume': 'volume'
+        }
+        
+        # Check which columns are present
+        for old_col, new_col in column_map.items():
+            if old_col in df.columns:
+                df.rename(columns={old_col: new_col}, inplace=True)
+        
+        # Convert to numeric
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Sort by timestamp
+        if 'timestamp' in df.columns:
+            df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        return df
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching candle data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch candle data: {str(e)}")
 
 # API Routes
 
@@ -371,38 +529,164 @@ async def get_box_legacy():
     """Legacy box endpoint"""
     return await get_price_box()
 
-@app.get("/api/v1/strategy-filters")
+@app.get("/api/strategy/filters")
 async def get_strategy_filters():
     """
-    Get current strategy filter values
+    Get current strategy filter values with technical indicators
     
-    This endpoint calculates various technical indicators used for trading decisions.
-    Note: This is a placeholder implementation. In production, you would calculate
-    these values from actual historical candle data.
+    This endpoint calculates various technical indicators used for trading decisions:
+    - Range (high - low) of current candle
+    - ADX(14) for trend strength
+    - ATR(14) for volatility
+    - Volume vs SMA20
+    - 1H trend (SMA50 vs SMA200)
+    - Suggested high/low box using ATR
+    - Boolean filters for each indicator
+    - Overall filters_passed status
     
     Returns:
-        JSON with filter status
+        JSON with comprehensive filter status and technical indicators
     """
     try:
-        # For a production implementation, you would:
-        # 1. Fetch historical candle data
-        # 2. Calculate technical indicators (ADX, ATR, SMA, etc.)
-        # 3. Return actual computed values
+        logger.info("Calculating strategy filters...")
         
-        # Placeholder response
-        return JSONResponse({
-            "range": "—",
-            "adx_proxy": "—",
-            "atr_14": "—",
-            "volume_status": "—",
-            "one_hour_trend": "—",
+        # Fetch 15m candle data (need enough for calculations)
+        df_15m = fetch_candle_data(Config.SYMBOL, '15m', limit=200)
+        
+        if df_15m.empty or len(df_15m) < 50:
+            raise HTTPException(status_code=404, detail="Insufficient candle data for calculations")
+        
+        # Fetch 1h candle data for trend analysis
+        df_1h = fetch_candle_data(Config.SYMBOL, '1h', limit=250)
+        
+        # Get current (latest) candle data
+        current = df_15m.iloc[-1]
+        
+        # Calculate Range (high - low) of current candle
+        candle_range = float(current['high'] - current['low'])
+        
+        # Calculate technical indicators on 15m timeframe
+        df_15m['atr_14'] = calculate_atr(df_15m['high'], df_15m['low'], df_15m['close'], period=14)
+        df_15m['adx_14'] = calculate_adx(df_15m['high'], df_15m['low'], df_15m['close'], period=14)
+        df_15m['volume_sma20'] = calculate_sma(df_15m['volume'], period=20)
+        
+        # Get current indicator values
+        atr_value = float(df_15m['atr_14'].iloc[-1]) if not pd.isna(df_15m['atr_14'].iloc[-1]) else 0
+        adx_value = float(df_15m['adx_14'].iloc[-1]) if not pd.isna(df_15m['adx_14'].iloc[-1]) else 0
+        current_volume = float(current['volume'])
+        avg_volume = float(df_15m['volume_sma20'].iloc[-1]) if not pd.isna(df_15m['volume_sma20'].iloc[-1]) else current_volume
+        
+        # Calculate volume ratio
+        volume_ratio = (current_volume / avg_volume * 100) if avg_volume > 0 else 100
+        
+        # Calculate 1H trend (SMA50 vs SMA200)
+        trend_status = "neutral"
+        trend_ok = False
+        
+        if not df_1h.empty and len(df_1h) >= 200:
+            df_1h['sma50'] = calculate_sma(df_1h['close'], period=50)
+            df_1h['sma200'] = calculate_sma(df_1h['close'], period=200)
+            
+            sma50 = df_1h['sma50'].iloc[-1]
+            sma200 = df_1h['sma200'].iloc[-1]
+            
+            if not pd.isna(sma50) and not pd.isna(sma200):
+                if sma50 > sma200:
+                    trend_status = "bullish"
+                    trend_ok = True
+                elif sma50 < sma200:
+                    trend_status = "bearish"
+                    trend_ok = False
+                else:
+                    trend_status = "neutral"
+                    trend_ok = False
+        
+        # Calculate suggested high/low box using ATR
+        current_close = float(current['close'])
+        atr_multiplier = 1.5  # Standard multiplier for box calculation
+        suggested_high = current_close + (atr_value * atr_multiplier)
+        suggested_low = current_close - (atr_value * atr_multiplier)
+        
+        # Define filter thresholds (adjust based on strategy)
+        RANGE_MIN = 5.0  # Minimum range threshold
+        ADX_MIN = 20.0   # Minimum ADX for trending market
+        ATR_MIN = 10.0   # Minimum ATR threshold
+        VOLUME_MIN = 80.0  # Minimum volume percentage
+        
+        # Calculate boolean filters
+        range_ok = candle_range >= RANGE_MIN
+        adx_ok = adx_value >= ADX_MIN
+        atr_ok = atr_value >= ATR_MIN
+        volume_ok = volume_ratio >= VOLUME_MIN
+        # trend_ok already calculated above
+        
+        # Overall filter status
+        filters_passed = all([range_ok, adx_ok, atr_ok, volume_ok, trend_ok])
+        
+        # Prepare response
+        response = {
+            "symbol": Config.SYMBOL,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": "Strategy filters require historical data implementation"
-        })
+            
+            # Current candle info
+            "current_candle": {
+                "open": round(float(current['open']), 2),
+                "high": round(float(current['high']), 2),
+                "low": round(float(current['low']), 2),
+                "close": round(float(current['close']), 2),
+                "volume": round(float(current['volume']), 2)
+            },
+            
+            # Technical indicators
+            "indicators": {
+                "range": round(candle_range, 2),
+                "adx_14": round(adx_value, 2),
+                "atr_14": round(atr_value, 2),
+                "volume_vs_sma20": round(volume_ratio, 2),
+                "trend_1h": trend_status
+            },
+            
+            # Suggested box levels
+            "suggested_box": {
+                "high": round(suggested_high, 2),
+                "low": round(suggested_low, 2),
+                "range": round(suggested_high - suggested_low, 2)
+            },
+            
+            # Boolean filters
+            "filters": {
+                "range_ok": range_ok,
+                "adx_ok": adx_ok,
+                "atr_ok": atr_ok,
+                "volume_ok": volume_ok,
+                "trend_ok": trend_ok
+            },
+            
+            # Overall status
+            "filters_passed": filters_passed,
+            
+            # Filter thresholds (for transparency)
+            "thresholds": {
+                "range_min": RANGE_MIN,
+                "adx_min": ADX_MIN,
+                "atr_min": ATR_MIN,
+                "volume_min_pct": VOLUME_MIN
+            }
+        }
+        
+        logger.info(f"Strategy filters calculated - Passed: {filters_passed}")
+        return JSONResponse(response)
     
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in strategy filters: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get strategy filters: {str(e)}")
+        logger.error(f"Error calculating strategy filters: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to calculate strategy filters: {str(e)}")
+
+@app.get("/api/v1/strategy-filters")
+async def get_strategy_filters_v1():
+    """Legacy strategy filters endpoint - redirects to new API"""
+    return await get_strategy_filters()
 
 # Legacy endpoint
 @app.get("/strategy-filters")
