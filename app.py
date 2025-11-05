@@ -9,11 +9,12 @@ import hmac
 import hashlib
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 
 import requests
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -179,6 +180,101 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def require_bearer_token(request: Request) -> None:
+    """
+    Enforce optional bearer token auth for sensitive endpoints.
+    If STRATEGY_API_TOKEN is set, require Authorization: Bearer <token> header.
+    """
+    token = os.getenv("STRATEGY_API_TOKEN", "").strip()
+    if not token:
+        return  # No token configured; allow access
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    provided = auth_header.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(provided, token):
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+
+def fetch_candles(symbol: str, resolution: str, limit: int) -> pd.DataFrame:
+    """
+    Fetch historical candles from Delta Exchange and return as DataFrame.
+    Expects fields: time, open, high, low, close, volume
+    """
+    end_time = int(time.time())
+    # Map resolution to seconds per candle
+    res_to_sec = {
+        "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "4h": 14400, "1d": 86400,
+    }
+    sec = res_to_sec.get(resolution, 900)
+    start_time = end_time - (limit * sec)
+
+    url = f"{Config.BASE_URL}/v2/history/candles"
+    params = {
+        "resolution": resolution,
+        "symbol": symbol,
+        "start": start_time,
+        "end": end_time,
+    }
+    full_url = f"{url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+    data = safe_api_request(full_url)
+    candles = data.get("result", [])
+    if not isinstance(candles, list) or len(candles) == 0:
+        raise HTTPException(status_code=502, detail="No candle data returned")
+
+    # Delta typically returns list of dicts. Normalize into DataFrame
+    df = pd.DataFrame(candles)
+    # Try common field names
+    rename_map = {
+        "t": "time", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume",
+        "timestamp": "time"
+    }
+    df = df.rename(columns=rename_map)
+    required = ["time", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=502, detail=f"Candle data missing fields: {missing}")
+    # Ensure correct dtypes and sort by time
+    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+    df = df.sort_values("time").reset_index(drop=True)
+    return df
+
+
+def compute_atr_adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series]:
+    """
+    Compute ATR and ADX using Wilder's smoothing via EWM as approximation.
+    Returns (atr, adx) as pandas Series aligned with df.
+    """
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    alpha = 1 / period
+    atr = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr).replace([np.inf, -np.inf], np.nan)
+    minus_di = 100 * (minus_dm.ewm(alpha=alpha, adjust=False).mean() / atr).replace([np.inf, -np.inf], np.nan)
+    dx = 100 * (plus_di.subtract(minus_di).abs() / (plus_di + minus_di)).replace([np.inf, -np.inf], np.nan)
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+    return atr, adx
+
+
+def sma(series: pd.Series, period: int) -> pd.Series:
+    return series.rolling(window=period, min_periods=period).mean()
 
 # API Routes
 
@@ -403,6 +499,124 @@ async def get_strategy_filters():
     except Exception as e:
         logger.error(f"Error in strategy filters: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get strategy filters: {str(e)}")
+
+
+@app.get("/api/strategy/filters")
+async def strategy_filters(request: Request, resolution: Optional[str] = None):
+    """
+    Secure endpoint: compute strategy filters for current candle using Delta Exchange.
+
+    Query params:
+    - resolution: candle timeframe (default from config, e.g., 15m)
+
+    Security: if STRATEGY_API_TOKEN is set, requires Authorization: Bearer <token>.
+    """
+    # Security check
+    require_bearer_token(request)
+
+    # Parameters and thresholds
+    res = (resolution or Config.RESOLUTION).strip()
+    min_adx = float(os.getenv("MIN_ADX", "20"))
+    min_volume_ratio = float(os.getenv("MIN_VOLUME_RATIO", "1.0"))
+    range_atr_multiplier = float(os.getenv("RANGE_ATR_MULTIPLIER", "1.0"))
+
+    try:
+        # Fetch base resolution candles (need at least 200 for robust calcs)
+        base_limit = 300
+        df = fetch_candles(Config.SYMBOL, res, base_limit)
+        if len(df) < 50:
+            raise HTTPException(status_code=502, detail="Insufficient candles for calculation")
+
+        # Compute indicators on base timeframe
+        atr14, adx14 = compute_atr_adx(df, period=14)
+        vol_sma20 = sma(df["volume"], 20)
+
+        # Current candle metrics (latest row)
+        last = df.iloc[-1]
+        last_atr = float(atr14.iloc[-1]) if not np.isnan(atr14.iloc[-1]) else None
+        last_adx = float(adx14.iloc[-1]) if not np.isnan(adx14.iloc[-1]) else None
+        last_vol_sma20 = float(vol_sma20.iloc[-1]) if not np.isnan(vol_sma20.iloc[-1]) else None
+
+        last_range = float(abs(last["high"] - last["low"]))
+        last_volume = float(last["volume"]) if not np.isnan(last["volume"]) else None
+        last_close = float(last["close"]) if not np.isnan(last["close"]) else None
+
+        volume_ratio = None
+        if last_volume is not None and last_vol_sma20 and last_vol_sma20 > 0:
+            volume_ratio = last_volume / last_vol_sma20
+
+        # 1H trend via SMA50 vs SMA200 on 1h candles
+        trend = None
+        trend_ok = None
+        try:
+            df_1h = fetch_candles(Config.SYMBOL, "1h", 260)
+            sma50 = sma(df_1h["close"], 50)
+            sma200 = sma(df_1h["close"], 200)
+            v50 = float(sma50.iloc[-1]) if not np.isnan(sma50.iloc[-1]) else None
+            v200 = float(sma200.iloc[-1]) if not np.isnan(sma200.iloc[-1]) else None
+            if v50 is not None and v200 is not None:
+                trend = "bull" if v50 > v200 else "bear"
+                trend_ok = v50 > v200
+        except HTTPException:
+            # Bubble up later as partial data
+            pass
+        except Exception as e:
+            logger.warning(f"Trend calculation failed: {e}")
+
+        # Suggested box using ATR (± ATR around close)
+        suggested_high = suggested_low = None
+        if last_close is not None and last_atr is not None:
+            suggested_high = last_close + last_atr
+            suggested_low = last_close - last_atr
+
+        # Boolean filters
+        range_ok = None
+        adx_ok = None
+        atr_ok = None
+        volume_ok = None
+
+        if last_atr is not None:
+            range_ok = last_range >= (range_atr_multiplier * last_atr)
+            atr_ok = last_atr > 0
+        if last_adx is not None:
+            adx_ok = last_adx >= min_adx
+        if volume_ratio is not None:
+            volume_ok = volume_ratio >= min_volume_ratio
+
+        bools = [b for b in [range_ok, adx_ok, atr_ok, volume_ok, trend_ok] if b is not None]
+        filters_passed = (len(bools) > 0 and all(bools))
+
+        # Build response
+        response = {
+            "symbol": Config.SYMBOL,
+            "resolution": res,
+            "range": round(last_range, 6) if last_range is not None else None,
+            "adx_14": round(last_adx, 6) if last_adx is not None else None,
+            "atr_14": round(last_atr, 6) if last_atr is not None else None,
+            "volume": round(last_volume, 6) if last_volume is not None else None,
+            "volume_sma20": round(last_vol_sma20, 6) if last_vol_sma20 is not None else None,
+            "volume_ratio": round(volume_ratio, 6) if volume_ratio is not None else None,
+            "one_hour_trend": trend,
+            "suggested_box": {
+                "high": round(suggested_high, 6) if suggested_high is not None else None,
+                "low": round(suggested_low, 6) if suggested_low is not None else None,
+            },
+            "range_ok": range_ok,
+            "adx_ok": adx_ok,
+            "atr_ok": atr_ok,
+            "volume_ok": volume_ok,
+            "trend_ok": trend_ok,
+            "filters_passed": filters_passed,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "delta_exchange",
+        }
+        return JSONResponse(response)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error computing strategy filters: {e}")
+        raise HTTPException(status_code=500, detail="Failed to compute strategy filters")
 
 # Legacy endpoint
 @app.get("/strategy-filters")
