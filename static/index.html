@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ETH Strategy Dashboard</title>
+<style>
+  :root{
+    --bg:#0f1115;--card:#151924;--muted:#8b93a7;--text:#e7ecf5;--accent:#6aa4ff;
+    --green:#33d17a;--red:#ff5c70;--border:#202536;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .title{font-size:28px;font-weight:800;letter-spacing:.2px}
+  .status-chip{font-size:12px;padding:6px 10px;border:1px solid var(--border);border-radius:999px;color:var(--muted)}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}
+  .tab-btn{padding:10px 14px;background:#121622;border:1px solid var(--border);border-radius:10px;color:var(--muted);cursor:pointer}
+  .tab-btn.active{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;align-items:start}
+  .tab-panel{margin-top:10px}
+  .card{grid-column:span 12;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px}
+  @media(min-width:900px){.card.half{grid-column:span 6}}
+  .card h3{margin:0 0 12px 0;font-size:16px;letter-spacing:.2px}
+  .muted{color:var(--muted)}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .pill{padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:#0f1320;color:var(--muted);font-size:12px}
+  .metrics{display:flex;gap:16px;flex-wrap:wrap}
+  .metric{background:#0f1320;border:1px solid var(--border);padding:10px 12px;border-radius:12px;min-width:140px}
+  .metric .k{font-size:12px;color:var(--muted)}
+  .metric .v{font-size:18px;font-weight:700;margin-top:4px}
+  .green{color:var(--green)} .red{color:var(--red)}
+  .btn{padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:#11162a;color:var(--text);cursor:pointer}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:700}
+  .btn.danger{background:#2a1117;border-color:#3a1720;color:#ffd7dc}
+  .spacer{height:6px}
+  /* table */
+  .table-wrap{border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#0f1320}
+  table{width:100%;border-collapse:collapse}
+  thead th{position:sticky;top:0;background:#101524;border-bottom:1px solid var(--border);padding:12px;text-align:left;font-size:12px;color:var(--muted)}
+  tbody td{padding:10px 12px;border-bottom:1px solid #0f1220}
+  tbody tr:last-child td{border-bottom:none}
+  .right{text-align:right}
+  .center{text-align:center}
+  .note{font-size:12px;color:var(--muted)}
+  .footer{margin-top:20px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div class="title">ETH Strategy Dashboard</div>
+      <div class="status-chip" id="modeChip">Mode: <b>SIM</b></div>
+    </div>
+
+    <!-- Top metrics -->
+    <div class="row" style="margin-bottom:8px">
+      <div class="metrics">
+        <div class="metric"><div class="k">ETH Live Price</div><div class="v" id="mPrice">—</div></div>
+        <div class="metric"><div class="k">Balance (USDT)</div><div class="v" id="mBalance">—</div></div>
+        <div class="metric"><div class="k">High / Low Box</div><div class="v" id="mBox">—</div></div>
+        <div class="metric"><div class="k">Status</div><div class="v green" id="mConn">Ready</div></div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs" id="tabs">
+      <button class="tab-btn active" data-tab="live">Live Market</button>
+      <button class="tab-btn" data-tab="trade">Active Trade</button>
+      <button class="tab-btn" data-tab="today">Today Orders</button>
+      <button class="tab-btn" data-tab="history">Order History</button>
+    </div>
+
+    <!-- TAB: LIVE -->
+    <section class="grid tab-panel" id="tab-live" style="display:block">
+      <div class="card">
+        <h3>Live Market</h3>
+        <div class="row">
+          <span class="pill">Symbol: <b>ETH/USDT</b></span>
+          <span class="pill">Interval: <b>15m</b></span>
+          <span class="pill">TP: <b>24</b> pts</span>
+          <span class="pill">Max SL: <b>24</b> pts</span>
+          <span class="pill">SL Shift: <b>+15</b> pts</span>
+        </div>
+        <div class="spacer"></div>
+        <div class="note">Data auto-refreshes from backend API.</div>
+      </div>
+      <div class="card half">
+        <h3>Strategy Filters (current candle)</h3>
+        <div class="row">
+          <div class="metric"><div class="k">Range ≥ 10</div><div class="v" id="fRange">—</div></div>
+          <div class="metric"><div class="k">ADX-proxy &gt; 22</div><div class="v" id="fAdx">—</div></div>
+          <div class="metric"><div class="k">ATR(14) in [12,40]</div><div class="v" id="fAtr">—</div></div>
+          <div class="metric"><div class="k">Vol &gt; SMA20×1.20</div><div class="v" id="fVol">—</div></div>
+          <div class="metric"><div class="k">1H Trend</div><div class="v" id="fTrend">—</div></div>
+        </div>
+      </div>
+      <div class="card half">
+        <h3>Quick Actions</h3>
+        <div class="row">
+          <button class="btn" onclick="ui.mockTick()">Simulate Tick</button>
+          <button class="btn" onclick="ui.mockSignal('BUY')">Mock BUY Signal</button>
+          <button class="btn" onclick="ui.mockSignal('SELL')">Mock SELL Signal</button>
+          <button class="btn danger" onclick="ui.resetAll()">Reset UI</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: TRADE -->
+    <section class="grid tab-panel" id="tab-trade" style="display:none">
+      <div class="card">
+        <h3>Active Trade</h3>
+        <div class="row">
+          <div class="metric"><div class="k">Entry</div><div class="v" id="tEntry">—</div></div>
+          <div class="metric"><div class="k">Side</div><div class="v" id="tSide">—</div></div>
+          <div class="metric"><div class="k">SL</div><div class="v" id="tSL">—</div></div>
+          <div class="metric"><div class="k">Target</div><div class="v" id="tTP">—</div></div>
+          <div class="metric"><div class="k">P&amp;L</div><div class="v" id="tPnL">—</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: TODAY -->
+    <section class="grid tab-panel" id="tab-today" style="display:none">
+      <div class="card">
+        <h3>Today's Orders</h3>
+        <div class="table-wrap scroll-400">
+          <table id="tblToday">
+            <thead><tr>
+              <th>Sr</th><th>Entry</th><th>Exit</th><th class="center">Result</th><th class="right">P&amp;L</th><th>Time</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: HISTORY -->
+    <section class="grid tab-panel" id="tab-history" style="display:none">
+      <div class="card">
+        <h3>Order History</h3>
+        <div class="table-wrap scroll-400">
+          <table id="tblHistory">
+            <thead><tr>
+              <th>Sr</th><th>Entry</th><th>Exit</th><th class="center">Result</th><th class="right">P&amp;L</th><th>Time</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer">
+      © Strategy UI • Tabs: Live Market / Active Trade / Today Orders / Order History
+    </div>
+  </div>
+<script>
+const ui = {
+  setPrice: v=>document.getElementById("mPrice").innerText=v,
+  setBalance: v=>document.getElementById("mBalance").innerText=v,
+  setBox: v=>document.getElementById("mBox").innerText=v,
+  setFilter: (id,v)=>document.getElementById(id).innerText=v,
+  mockTick: ()=>{ui.setPrice((Math.random()*1000+4000).toFixed(2))},
+  mockSignal: s=>alert("Mock "+s+" signal"),
+  resetAll: ()=>location.reload()
+};
+
+// auto refresh from backend
+async function refresh(){
+  try {
+    let p = await fetch("/price").then(res => res.json());
+    ui.setPrice(p.price);
+
+    let b = await fetch("/box").then(res => res.json());
+    ui.setBox(b.box);
+
+    ui.setBalance(10000);
+
+    let filters = await fetch("/strategy-filters").then(res => res.json());
+    ui.setFilter("fRange", filters.range);
+    ui.setFilter("fAdx", filters.adx_proxy);
+    ui.setFilter("fAtr", filters.atr_14);
+    ui.setFilter("fVol", filters.volume_status);
+    ui.setFilter("fTrend", filters.one_hour_trend);
+  } catch (error) {
+    console.error(error);
+  }
+}
+setInterval(refresh,3000);
+refresh();
+
+// tab switching
+document.querySelectorAll(".tab-btn").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab-panel").forEach(p=>p.style.display="none");
+    document.getElementById("tab-"+btn.dataset.tab).style.display="block";
+  })
+});
+</script>
+ </body>
+</html>
