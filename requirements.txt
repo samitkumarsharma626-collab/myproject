@@ -1,7 +1,13 @@
-fastapi
-uvicorn
-requests
-pandas
-numpy
-python-dotenv
-pytz
+# Core dependencies with pinned versions for security and reproducibility
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+requests==2.31.0
+pandas==2.2.0
+numpy==1.26.4
+python-dotenv==1.0.1
+pydantic==2.6.1
+pydantic-settings==2.1.0
+pytz==2024.1
+
+# Production server
+gunicorn==21.2.0

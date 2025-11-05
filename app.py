@@ -1,13 +1,13 @@
 """
 ETH Strategy Dashboard - FastAPI Backend
-Production-ready, secure, and maintainable implementation
+Production-ready, secure, and fully validated implementation
 """
 
-import os
 import time
 import hmac
 import hashlib
-import logging
+import json
+import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
@@ -15,78 +15,219 @@ from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
-# Load environment variables
-load_dotenv()
+from config import settings
+import logging
+import logging.config
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# =============================================================================
+# STRUCTURED LOGGING CONFIGURATION
+# =============================================================================
+
+class SecureFormatter(logging.Formatter):
+    """Custom formatter that redacts sensitive information"""
+    
+    SENSITIVE_KEYS = {
+        'api_key', 'api-key', 'signature', 'password', 'secret', 
+        'token', 'authorization', 'auth'
+    }
+    
+    def format(self, record: logging.LogRecord) -> str:
+        # Redact sensitive data from log message
+        if hasattr(record, 'args') and record.args:
+            record.args = self._redact_sensitive(record.args)
+        
+        return super().format(record)
+    
+    def _redact_sensitive(self, data: Any) -> Any:
+        """Recursively redact sensitive information"""
+        if isinstance(data, dict):
+            return {
+                k: '***REDACTED***' if k.lower() in self.SENSITIVE_KEYS else self._redact_sensitive(v)
+                for k, v in data.items()
+            }
+        elif isinstance(data, (list, tuple)):
+            return type(data)(self._redact_sensitive(item) for item in data)
+        return data
+
+
+def setup_logging():
+    """Configure structured logging based on environment"""
+    log_level = getattr(logging, settings.log_level)
+    
+    if settings.log_format == "json":
+        # JSON logging for production
+        import logging.config
+        
+        LOGGING_CONFIG = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "json": {
+                    "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "fmt": "%(asctime)s %(name)s %(levelname)s %(message)s"
+                }
+            },
+            "handlers": {
+                "console": {
+                    "class": "logging.StreamHandler",
+                    "level": log_level,
+                    "formatter": "json",
+                    "stream": "ext://sys.stdout"
+                }
+            },
+            "root": {
+                "level": log_level,
+                "handlers": ["console"]
+            }
+        }
+        
+        try:
+            logging.config.dictConfig(LOGGING_CONFIG)
+        except ImportError:
+            # Fallback if pythonjsonlogger not installed
+            logging.basicConfig(
+                level=log_level,
+                format='{"timestamp":"%(asctime)s","name":"%(name)s","level":"%(levelname)s","message":"%(message)s"}',
+            )
+    else:
+        # Text logging for development
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler()]
+        )
+    
+    # Apply secure formatter
+    for handler in logging.root.handlers:
+        if not settings.is_production():
+            handler.setFormatter(SecureFormatter(handler.formatter._fmt if hasattr(handler, 'formatter') else '%(message)s'))
+
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
-# Configuration
-class Config:
-    """Application configuration"""
-    API_KEY: str = os.getenv("DELTA_API_KEY", "")
-    API_SECRET: str = os.getenv("DELTA_API_SECRET", "")
-    BASE_URL: str = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
-    SYMBOL: str = os.getenv("TRADING_SYMBOL", "ETHUSD")
-    RESOLUTION: str = os.getenv("CANDLE_RESOLUTION", "15m")
-    
-    # File paths - support both dev and production
-    STATIC_DIR: Path = Path(os.getenv("STATIC_DIR", "./static"))
-    
-    # API settings
-    REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "10"))
-    
-    # Validate critical settings
-    @classmethod
-    def validate(cls) -> None:
-        """Validate required configuration"""
-        if not cls.API_KEY or cls.API_KEY == "YOUR_API_KEY":
-            logger.warning("API_KEY not configured - some endpoints will not work")
-        if not cls.API_SECRET or cls.API_SECRET == "YOUR_API_SECRET":
-            logger.warning("API_SECRET not configured - some endpoints will not work")
-        if not cls.STATIC_DIR.exists():
-            logger.warning(f"Static directory not found: {cls.STATIC_DIR}")
+# =============================================================================
+# SECURITY MIDDLEWARE
+# =============================================================================
 
-# Validate configuration on startup
-Config.validate()
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+    
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        # Content Security Policy
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp
+        
+        # Remove server header
+        response.headers.pop("Server", None)
+        
+        return response
 
-# Initialize FastAPI app
+
+class ErrorHandlingMiddleware(BaseHTTPMiddleware):
+    """Centralized error handling middleware"""
+    
+    async def dispatch(self, request: Request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            logger.error(
+                f"Unhandled exception: {exc}",
+                exc_info=settings.is_development(),
+                extra={
+                    "path": request.url.path,
+                    "method": request.method,
+                    "client": request.client.host if request.client else "unknown"
+                }
+            )
+            
+            # Include stack trace only in development
+            detail = {
+                "error": "Internal Server Error",
+                "message": "An unexpected error occurred"
+            }
+            
+            if settings.is_development():
+                detail["detail"] = str(exc)
+                detail["traceback"] = traceback.format_exc()
+            
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=detail
+            )
+
+
+# =============================================================================
+# FASTAPI APPLICATION
+# =============================================================================
+
 app = FastAPI(
     title="ETH Strategy Dashboard API",
     description="Real-time ETH strategy monitoring and trading API",
     version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
+    docs_url="/api/docs" if not settings.is_production() else None,
+    redoc_url="/api/redoc" if not settings.is_production() else None,
+    openapi_url="/api/openapi.json" if not settings.is_production() else None,
 )
 
-# Add CORS middleware
+# Add security middleware
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ErrorHandlingMiddleware)
+
+# Add CORS middleware with strict settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
+    max_age=3600,
 )
 
-# Mount static files if directory exists
-if Config.STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(Config.STATIC_DIR)), name="static")
-    logger.info(f"Static files mounted from {Config.STATIC_DIR}")
-else:
-    logger.warning(f"Static directory not found: {Config.STATIC_DIR}")
+# Add trusted host middleware for production
+if settings.is_production():
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.trusted_hosts
+    )
 
-# Helper Functions
+# Mount static files if directory exists
+if settings.static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
+    logger.info(f"Static files mounted from {settings.static_dir}")
+else:
+    logger.warning(f"Static directory not found: {settings.static_dir}")
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
 def create_signature(method: str, timestamp: str, path: str, body: str = "") -> str:
     """
     Create HMAC signature for Delta Exchange API authentication
@@ -102,11 +243,12 @@ def create_signature(method: str, timestamp: str, path: str, body: str = "") -> 
     """
     message = method + timestamp + path + body
     signature = hmac.new(
-        Config.API_SECRET.encode('utf-8'),
+        settings.get_api_secret().encode('utf-8'),
         message.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
     return signature
+
 
 def get_auth_headers(method: str, path: str, body: str = "") -> Dict[str, str]:
     """
@@ -118,7 +260,7 @@ def get_auth_headers(method: str, path: str, body: str = "") -> Dict[str, str]:
         body: Request body
     
     Returns:
-        Dictionary of HTTP headers
+        Dictionary of HTTP headers (secrets are not logged)
     """
     timestamp = str(int(time.time()))
     signature = create_signature(method, timestamp, path, body)
@@ -126,11 +268,12 @@ def get_auth_headers(method: str, path: str, body: str = "") -> Dict[str, str]:
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "api-key": Config.API_KEY,
+        "api-key": settings.get_api_key(),
         "signature": signature,
         "timestamp": timestamp,
         "User-Agent": "ethbot-fastapi/1.0"
     }
+
 
 def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None, 
                      authenticated: bool = False) -> Dict[str, Any]:
@@ -152,7 +295,11 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
         if headers is None:
             headers = {"Accept": "application/json"}
         
-        response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        # Log request (without sensitive headers)
+        safe_headers = {k: v for k, v in headers.items() if k.lower() not in ['api-key', 'signature', 'authorization']}
+        logger.debug(f"API request to {url}", extra={"headers": safe_headers})
+        
+        response = requests.get(url, headers=headers, timeout=settings.request_timeout)
         response.raise_for_status()
         
         data = response.json()
@@ -178,85 +325,53 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error in API request: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Technical Indicator Functions
+
+# =============================================================================
+# TECHNICAL INDICATOR FUNCTIONS
+# =============================================================================
 
 def calculate_sma(data: pd.Series, period: int) -> pd.Series:
-    """
-    Calculate Simple Moving Average
-    
-    Args:
-        data: Price series
-        period: SMA period
-    
-    Returns:
-        SMA series
-    """
+    """Calculate Simple Moving Average"""
     return data.rolling(window=period, min_periods=period).mean()
 
+
 def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """
-    Calculate Average True Range (ATR)
-    
-    Args:
-        high: High prices
-        low: Low prices
-        close: Close prices
-        period: ATR period (default 14)
-    
-    Returns:
-        ATR series
-    """
-    # Calculate True Range
+    """Calculate Average True Range (ATR)"""
     high_low = high - low
     high_close = np.abs(high - close.shift())
     low_close = np.abs(low - close.shift())
     
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    
-    # Calculate ATR using exponential moving average
     atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
     
     return atr
 
+
 def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """
-    Calculate Average Directional Index (ADX)
-    
-    Args:
-        high: High prices
-        low: Low prices
-        close: Close prices
-        period: ADX period (default 14)
-    
-    Returns:
-        ADX series
-    """
-    # Calculate +DM and -DM
+    """Calculate Average Directional Index (ADX)"""
     high_diff = high.diff()
     low_diff = -low.diff()
     
     pos_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
     neg_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
     
-    # Calculate True Range
     high_low = high - low
     high_close = np.abs(high - close.shift())
     low_close = np.abs(low - close.shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     
-    # Smooth using Wilder's method (exponential moving average)
     atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
     pos_di = 100 * pos_dm.ewm(span=period, adjust=False, min_periods=period).mean() / atr
     neg_di = 100 * neg_dm.ewm(span=period, adjust=False, min_periods=period).mean() / atr
     
-    # Calculate DX and ADX
     dx = 100 * np.abs(pos_di - neg_di) / (pos_di + neg_di)
     adx = dx.ewm(span=period, adjust=False, min_periods=period).mean()
     
     return adx
+
 
 def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.DataFrame:
     """
@@ -274,10 +389,8 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
         HTTPException: On request failure
     """
     try:
-        # Calculate time range
         end_time = int(time.time())
         
-        # Convert resolution to seconds
         resolution_map = {
             '1m': 60, '3m': 180, '5m': 300, '15m': 900,
             '30m': 1800, '1h': 3600, '2h': 7200, '4h': 14400,
@@ -287,7 +400,7 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
         seconds_per_candle = resolution_map.get(resolution, 900)
         start_time = end_time - (limit * seconds_per_candle)
         
-        url = f"{Config.BASE_URL}/v2/history/candles"
+        url = f"{settings.delta_base_url}/v2/history/candles"
         params = {
             "resolution": resolution,
             "symbol": symbol,
@@ -303,10 +416,8 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
         if not candles or len(candles) == 0:
             raise HTTPException(status_code=404, detail="No candle data available")
         
-        # Convert to DataFrame
         df = pd.DataFrame(candles)
         
-        # Rename columns to standard OHLCV format
         column_map = {
             'time': 'timestamp',
             'open': 'open',
@@ -316,17 +427,14 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
             'volume': 'volume'
         }
         
-        # Check which columns are present
         for old_col, new_col in column_map.items():
             if old_col in df.columns:
                 df.rename(columns={old_col: new_col}, inplace=True)
         
-        # Convert to numeric
         for col in ['open', 'high', 'low', 'close', 'volume']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # Sort by timestamp
         if 'timestamp' in df.columns:
             df = df.sort_values('timestamp').reset_index(drop=True)
         
@@ -335,21 +443,25 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching candle data: {e}")
+        logger.error(f"Error fetching candle data: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to fetch candle data: {str(e)}")
 
-# API Routes
+
+# =============================================================================
+# API ROUTES
+# =============================================================================
 
 @app.get("/")
 async def root():
     """Serve the main dashboard HTML"""
-    index_file = Config.STATIC_DIR / "index.html"
+    index_file = settings.static_dir / "index.html"
     
     if not index_file.exists():
         logger.error(f"index.html not found at {index_file}")
         raise HTTPException(status_code=404, detail="Dashboard not found")
     
     return FileResponse(str(index_file))
+
 
 @app.get("/health")
 async def health_check():
@@ -363,8 +475,10 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "1.0.0",
-        "mode": os.getenv("APP_MODE", "PRODUCTION")
+        "environment": settings.environment,
+        "config_valid": settings.is_valid()
     })
+
 
 @app.get("/api/v1/price")
 async def get_current_price():
@@ -375,12 +489,11 @@ async def get_current_price():
         JSON with symbol and current price
     """
     try:
-        url = f"{Config.BASE_URL}/v2/tickers/{Config.SYMBOL}"
-        logger.info(f"Fetching price for {Config.SYMBOL}")
+        url = f"{settings.delta_base_url}/v2/tickers/{settings.trading_symbol}"
+        logger.info(f"Fetching price for {settings.trading_symbol}")
         
         data = safe_api_request(url)
         
-        # Extract price from result
         result = data.get("result", {})
         price = float(
             result.get("mark_price") or 
@@ -395,7 +508,7 @@ async def get_current_price():
         logger.info(f"Price fetched successfully: {price}")
         
         return JSONResponse({
-            "symbol": Config.SYMBOL,
+            "symbol": settings.trading_symbol,
             "price": round(price, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "delta_exchange"
@@ -404,31 +517,32 @@ async def get_current_price():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching price: {e}")
+        logger.error(f"Error fetching price: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to fetch price: {str(e)}")
 
-# Legacy endpoint for backward compatibility
+
 @app.get("/price")
 async def get_price_legacy():
     """Legacy price endpoint - redirects to new API"""
     return await get_current_price()
 
+
 @app.get("/api/v1/balance")
 async def get_wallet_balance():
     """
-    Get wallet balance from Delta Exchange
+    Get wallet balance from Delta Exchange (requires API credentials)
     
     Returns:
         JSON with balance information
     """
     # Validate credentials
-    if not Config.API_KEY or Config.API_KEY == "YOUR_API_KEY":
+    if not settings.get_api_key() or settings.get_api_key() == "YOUR_API_KEY":
         raise HTTPException(
             status_code=401, 
             detail="API credentials not configured. Set DELTA_API_KEY environment variable."
         )
     
-    if not Config.API_SECRET or Config.API_SECRET == "YOUR_API_SECRET":
+    if not settings.get_api_secret() or settings.get_api_secret() == "YOUR_API_SECRET":
         raise HTTPException(
             status_code=401,
             detail="API secret not configured. Set DELTA_API_SECRET environment variable."
@@ -439,12 +553,11 @@ async def get_wallet_balance():
         path = "/v2/wallet/balances"
         
         headers = get_auth_headers(method, path)
-        url = Config.BASE_URL + path
+        url = settings.delta_base_url + path
         
         logger.info("Fetching wallet balance")
         data = safe_api_request(url, headers=headers, authenticated=True)
         
-        # Find USD/USDT/USDC balance
         assets = data.get("result", [])
         supported_assets = ["USD", "USDT", "USDC", "MARGIN", "CASH"]
         
@@ -457,7 +570,7 @@ async def get_wallet_balance():
             balance = float(asset.get("available_balance", asset.get("balance", 0)))
             symbol = asset.get("asset_symbol", "")
             
-            logger.info(f"Balance fetched: {balance} {symbol}")
+            logger.info(f"Balance fetched successfully")
             
             return JSONResponse({
                 "balance": round(balance, 2),
@@ -466,7 +579,7 @@ async def get_wallet_balance():
                 "available": True
             })
         else:
-            logger.warning(f"No supported asset found. Available assets: {[a.get('asset_symbol') for a in assets]}")
+            logger.warning(f"No supported asset found")
             return JSONResponse({
                 "balance": 0,
                 "asset": "",
@@ -478,14 +591,15 @@ async def get_wallet_balance():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching balance: {e}")
+        logger.error(f"Error fetching balance: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to fetch balance: {str(e)}")
 
-# Legacy endpoint for backward compatibility
+
 @app.get("/balance")
 async def get_balance_legacy():
-    """Legacy balance endpoint - redirects to new API"""
+    """Legacy balance endpoint"""
     return await get_wallet_balance()
+
 
 @app.get("/api/v1/box")
 async def get_price_box():
@@ -496,7 +610,7 @@ async def get_price_box():
         JSON with high/low price range
     """
     try:
-        url = f"{Config.BASE_URL}/v2/tickers/{Config.SYMBOL}"
+        url = f"{settings.delta_base_url}/v2/tickers/{settings.trading_symbol}"
         data = safe_api_request(url)
         
         result = data.get("result", {})
@@ -520,29 +634,20 @@ async def get_price_box():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching price box: {e}")
+        logger.error(f"Error fetching price box: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to fetch price box: {str(e)}")
 
-# Legacy endpoint
+
 @app.get("/box")
 async def get_box_legacy():
     """Legacy box endpoint"""
     return await get_price_box()
 
+
 @app.get("/api/strategy/filters")
 async def get_strategy_filters():
     """
     Get current strategy filter values with technical indicators
-    
-    This endpoint calculates various technical indicators used for trading decisions:
-    - Range (high - low) of current candle
-    - ADX(14) for trend strength
-    - ATR(14) for volatility
-    - Volume vs SMA20
-    - 1H trend (SMA50 vs SMA200)
-    - Suggested high/low box using ATR
-    - Boolean filters for each indicator
-    - Overall filters_passed status
     
     Returns:
         JSON with comprehensive filter status and technical indicators
@@ -550,36 +655,28 @@ async def get_strategy_filters():
     try:
         logger.info("Calculating strategy filters...")
         
-        # Fetch 15m candle data (need enough for calculations)
-        df_15m = fetch_candle_data(Config.SYMBOL, '15m', limit=200)
+        df_15m = fetch_candle_data(settings.trading_symbol, '15m', limit=200)
         
         if df_15m.empty or len(df_15m) < 50:
             raise HTTPException(status_code=404, detail="Insufficient candle data for calculations")
         
-        # Fetch 1h candle data for trend analysis
-        df_1h = fetch_candle_data(Config.SYMBOL, '1h', limit=250)
+        df_1h = fetch_candle_data(settings.trading_symbol, '1h', limit=250)
         
-        # Get current (latest) candle data
         current = df_15m.iloc[-1]
         
-        # Calculate Range (high - low) of current candle
         candle_range = float(current['high'] - current['low'])
         
-        # Calculate technical indicators on 15m timeframe
         df_15m['atr_14'] = calculate_atr(df_15m['high'], df_15m['low'], df_15m['close'], period=14)
         df_15m['adx_14'] = calculate_adx(df_15m['high'], df_15m['low'], df_15m['close'], period=14)
         df_15m['volume_sma20'] = calculate_sma(df_15m['volume'], period=20)
         
-        # Get current indicator values
         atr_value = float(df_15m['atr_14'].iloc[-1]) if not pd.isna(df_15m['atr_14'].iloc[-1]) else 0
         adx_value = float(df_15m['adx_14'].iloc[-1]) if not pd.isna(df_15m['adx_14'].iloc[-1]) else 0
         current_volume = float(current['volume'])
         avg_volume = float(df_15m['volume_sma20'].iloc[-1]) if not pd.isna(df_15m['volume_sma20'].iloc[-1]) else current_volume
         
-        # Calculate volume ratio
         volume_ratio = (current_volume / avg_volume * 100) if avg_volume > 0 else 100
         
-        # Calculate 1H trend (SMA50 vs SMA200)
         trend_status = "neutral"
         trend_ok = False
         
@@ -597,38 +694,27 @@ async def get_strategy_filters():
                 elif sma50 < sma200:
                     trend_status = "bearish"
                     trend_ok = False
-                else:
-                    trend_status = "neutral"
-                    trend_ok = False
         
-        # Calculate suggested high/low box using ATR
         current_close = float(current['close'])
-        atr_multiplier = 1.5  # Standard multiplier for box calculation
+        atr_multiplier = 1.5
         suggested_high = current_close + (atr_value * atr_multiplier)
         suggested_low = current_close - (atr_value * atr_multiplier)
         
-        # Define filter thresholds (adjust based on strategy)
-        RANGE_MIN = 5.0  # Minimum range threshold
-        ADX_MIN = 20.0   # Minimum ADX for trending market
-        ATR_MIN = 10.0   # Minimum ATR threshold
-        VOLUME_MIN = 80.0  # Minimum volume percentage
+        RANGE_MIN = 5.0
+        ADX_MIN = 20.0
+        ATR_MIN = 10.0
+        VOLUME_MIN = 80.0
         
-        # Calculate boolean filters
         range_ok = candle_range >= RANGE_MIN
         adx_ok = adx_value >= ADX_MIN
         atr_ok = atr_value >= ATR_MIN
         volume_ok = volume_ratio >= VOLUME_MIN
-        # trend_ok already calculated above
         
-        # Overall filter status
         filters_passed = all([range_ok, adx_ok, atr_ok, volume_ok, trend_ok])
         
-        # Prepare response
         response = {
-            "symbol": Config.SYMBOL,
+            "symbol": settings.trading_symbol,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            
-            # Current candle info
             "current_candle": {
                 "open": round(float(current['open']), 2),
                 "high": round(float(current['high']), 2),
@@ -636,8 +722,6 @@ async def get_strategy_filters():
                 "close": round(float(current['close']), 2),
                 "volume": round(float(current['volume']), 2)
             },
-            
-            # Technical indicators
             "indicators": {
                 "range": round(candle_range, 2),
                 "adx_14": round(adx_value, 2),
@@ -645,15 +729,11 @@ async def get_strategy_filters():
                 "volume_vs_sma20": round(volume_ratio, 2),
                 "trend_1h": trend_status
             },
-            
-            # Suggested box levels
             "suggested_box": {
                 "high": round(suggested_high, 2),
                 "low": round(suggested_low, 2),
                 "range": round(suggested_high - suggested_low, 2)
             },
-            
-            # Boolean filters
             "filters": {
                 "range_ok": range_ok,
                 "adx_ok": adx_ok,
@@ -661,11 +741,7 @@ async def get_strategy_filters():
                 "volume_ok": volume_ok,
                 "trend_ok": trend_ok
             },
-            
-            # Overall status
             "filters_passed": filters_passed,
-            
-            # Filter thresholds (for transparency)
             "thresholds": {
                 "range_min": RANGE_MIN,
                 "adx_min": ADX_MIN,
@@ -680,19 +756,21 @@ async def get_strategy_filters():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error calculating strategy filters: {e}", exc_info=True)
+        logger.error(f"Error calculating strategy filters: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to calculate strategy filters: {str(e)}")
+
 
 @app.get("/api/v1/strategy-filters")
 async def get_strategy_filters_v1():
-    """Legacy strategy filters endpoint - redirects to new API"""
+    """Legacy strategy filters endpoint"""
     return await get_strategy_filters()
 
-# Legacy endpoint
+
 @app.get("/strategy-filters")
 async def get_strategy_filters_legacy():
     """Legacy strategy filters endpoint"""
     return await get_strategy_filters()
+
 
 @app.get("/api/v1/candles")
 async def get_candles(limit: int = 100):
@@ -700,7 +778,7 @@ async def get_candles(limit: int = 100):
     Get historical candle data
     
     Args:
-        limit: Number of candles to fetch (max 500)
+        limit: Number of candles to fetch (1-500)
     
     Returns:
         JSON with candle data
@@ -709,14 +787,13 @@ async def get_candles(limit: int = 100):
         raise HTTPException(status_code=400, detail="Limit must be between 1 and 500")
     
     try:
-        # Calculate time range (assuming 15m candles)
         end_time = int(time.time())
-        start_time = end_time - (limit * 15 * 60)  # 15 minutes per candle
+        start_time = end_time - (limit * 15 * 60)
         
-        url = f"{Config.BASE_URL}/v2/history/candles"
+        url = f"{settings.delta_base_url}/v2/history/candles"
         params = {
-            "resolution": Config.RESOLUTION,
-            "symbol": Config.SYMBOL,
+            "resolution": settings.candle_resolution,
+            "symbol": settings.trading_symbol,
             "start": start_time,
             "end": end_time
         }
@@ -729,8 +806,8 @@ async def get_candles(limit: int = 100):
         logger.info(f"Fetched {len(candles)} candles")
         
         return JSONResponse({
-            "symbol": Config.SYMBOL,
-            "resolution": Config.RESOLUTION,
+            "symbol": settings.trading_symbol,
+            "resolution": settings.candle_resolution,
             "candles": candles,
             "count": len(candles),
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -739,8 +816,13 @@ async def get_candles(limit: int = 100):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching candles: {e}")
+        logger.error(f"Error fetching candles: {e}", exc_info=settings.is_development())
         raise HTTPException(status_code=500, detail=f"Failed to fetch candles: {str(e)}")
+
+
+# =============================================================================
+# ERROR HANDLERS
+# =============================================================================
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc: HTTPException):
@@ -750,54 +832,72 @@ async def not_found_handler(request: Request, exc: HTTPException):
         content={
             "error": "Not Found",
             "message": "The requested resource was not found",
-            "path": str(request.url.path)
+            "path": str(request.url.path),
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     )
+
 
 @app.exception_handler(500)
 async def internal_error_handler(request: Request, exc: Exception):
     """Custom 500 handler"""
-    logger.error(f"Internal error: {exc}")
+    logger.error(f"Internal error: {exc}", exc_info=settings.is_development())
+    
+    content = {
+        "error": "Internal Server Error",
+        "message": "An unexpected error occurred",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    # Include details only in development
+    if settings.is_development():
+        content["detail"] = str(exc)
+    
     return JSONResponse(
         status_code=500,
-        content={
-            "error": "Internal Server Error",
-            "message": "An unexpected error occurred"
-        }
+        content=content
     )
 
-# Startup event
+
+# =============================================================================
+# STARTUP AND SHUTDOWN EVENTS
+# =============================================================================
+
 @app.on_event("startup")
 async def startup_event():
     """Log startup information"""
     logger.info("=" * 50)
     logger.info("ETH Strategy Dashboard API Starting")
-    logger.info(f"Symbol: {Config.SYMBOL}")
-    logger.info(f"Resolution: {Config.RESOLUTION}")
-    logger.info(f"Base URL: {Config.BASE_URL}")
-    logger.info(f"Static Dir: {Config.STATIC_DIR}")
-    logger.info(f"API Key configured: {'Yes' if Config.API_KEY and Config.API_KEY != 'YOUR_API_KEY' else 'No'}")
+    logger.info(f"Environment: {settings.environment}")
+    logger.info(f"Debug Mode: {settings.debug}")
+    logger.info(f"Symbol: {settings.trading_symbol}")
+    logger.info(f"Resolution: {settings.candle_resolution}")
+    logger.info(f"Base URL: {settings.delta_base_url}")
+    logger.info(f"Static Dir: {settings.static_dir}")
+    logger.info(f"API Key configured: {'Yes' if settings.get_api_key() and settings.get_api_key() != 'YOUR_API_KEY' else 'No'}")
+    logger.info(f"Configuration valid: {settings.is_valid()}")
     logger.info("=" * 50)
 
-# Shutdown event
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("ETH Strategy Dashboard API Shutting Down")
 
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
 if __name__ == "__main__":
     import uvicorn
     
-    # Run server
-    port = int(os.getenv("PORT", "8000"))
-    host = os.getenv("HOST", "0.0.0.0")
-    
-    logger.info(f"Starting server on {host}:{port}")
+    logger.info(f"Starting server on {settings.host}:{settings.port}")
     
     uvicorn.run(
         "app:app",
-        host=host,
-        port=port,
-        reload=os.getenv("DEBUG", "false").lower() == "true",
-        log_level="info"
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+        log_level=settings.log_level.lower()
     )
