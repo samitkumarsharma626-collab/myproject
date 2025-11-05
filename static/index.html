@@ -1,204 +1,630 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ETH Strategy Dashboard</title>
-<style>
-  :root{
-    --bg:#0f1115;--card:#151924;--muted:#8b93a7;--text:#e7ecf5;--accent:#6aa4ff;
-    --green:#33d17a;--red:#ff5c70;--border:#202536;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial}
-  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
-  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-  .title{font-size:28px;font-weight:800;letter-spacing:.2px}
-  .status-chip{font-size:12px;padding:6px 10px;border:1px solid var(--border);border-radius:999px;color:var(--muted)}
-  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}
-  .tab-btn{padding:10px 14px;background:#121622;border:1px solid var(--border);border-radius:10px;color:var(--muted);cursor:pointer}
-  .tab-btn.active{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:700}
-  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;align-items:start}
-  .tab-panel{margin-top:10px}
-  .card{grid-column:span 12;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px}
-  @media(min-width:900px){.card.half{grid-column:span 6}}
-  .card h3{margin:0 0 12px 0;font-size:16px;letter-spacing:.2px}
-  .muted{color:var(--muted)}
-  .row{display:flex;gap:12px;flex-wrap:wrap}
-  .pill{padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:#0f1320;color:var(--muted);font-size:12px}
-  .metrics{display:flex;gap:16px;flex-wrap:wrap}
-  .metric{background:#0f1320;border:1px solid var(--border);padding:10px 12px;border-radius:12px;min-width:140px}
-  .metric .k{font-size:12px;color:var(--muted)}
-  .metric .v{font-size:18px;font-weight:700;margin-top:4px}
-  .green{color:var(--green)} .red{color:var(--red)}
-  .btn{padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:#11162a;color:var(--text);cursor:pointer}
-  .btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:700}
-  .btn.danger{background:#2a1117;border-color:#3a1720;color:#ffd7dc}
-  .spacer{height:6px}
-  /* table */
-  .table-wrap{border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#0f1320}
-  table{width:100%;border-collapse:collapse}
-  thead th{position:sticky;top:0;background:#101524;border-bottom:1px solid var(--border);padding:12px;text-align:left;font-size:12px;color:var(--muted)}
-  tbody td{padding:10px 12px;border-bottom:1px solid #0f1220}
-  tbody tr:last-child td{border-bottom:none}
-  .right{text-align:right}
-  .center{text-align:center}
-  .note{font-size:12px;color:var(--muted)}
-  .footer{margin-top:20px;color:var(--muted);font-size:12px}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Real-time ETH strategy monitoring dashboard.">
+  <title>ETH Strategy Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #151924;
+      --muted: #8b93a7;
+      --text: #e7ecf5;
+      --accent: #6aa4ff;
+      --green: #33d17a;
+      --red: #ff5c70;
+      --border: #202536;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      gap: 16px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0.2px;
+    }
+
+    .status-chip {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0 16px;
+    }
+
+    .tab-btn {
+      padding: 10px 14px;
+      background: #121622;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .tab-btn[aria-selected="true"],
+    .tab-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #0b1020;
+      font-weight: 700;
+    }
+
+    .tab-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
+    .tab-panel {
+      margin-top: 10px;
+    }
+
+    .card {
+      grid-column: span 12;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+    }
+
+    @media (min-width: 900px) {
+      .card.half {
+        grid-column: span 6;
+      }
+    }
+
+    .card h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      letter-spacing: 0.2px;
+    }
+
+    .metrics-row {
+      margin-bottom: 8px;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .metric {
+      background: #0f1320;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-width: 140px;
+    }
+
+    .metric .k {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .metric .v {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 4px 0 0;
+    }
+
+    .green {
+      color: var(--green);
+    }
+
+    .red {
+      color: var(--red);
+    }
+
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #0f1320;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .btn {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #11162a;
+      color: var(--text);
+      cursor: pointer;
+      transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #0b1020;
+      font-weight: 700;
+    }
+
+    .btn.danger {
+      background: #2a1117;
+      border-color: #3a1720;
+      color: #ffd7dc;
+    }
+
+    .spacer {
+      height: 6px;
+    }
+
+    .table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #0f1320;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    caption {
+      caption-side: top;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 12px;
+      text-align: left;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #101524;
+      border-bottom: 1px solid var(--border);
+      padding: 12px;
+      text-align: left;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    tbody td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #0f1220;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .right {
+      text-align: right;
+    }
+
+    .center {
+      text-align: center;
+    }
+
+    .note {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .footer {
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .scroll-400 {
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      border: 0;
+    }
+  </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="header">
-      <div class="title">ETH Strategy Dashboard</div>
-      <div class="status-chip" id="modeChip">Mode: <b>SIM</b></div>
-    </div>
+    <header class="header">
+      <h1 class="title">ETH Strategy Dashboard</h1>
+      <p class="status-chip" id="modeChip" aria-live="polite">Mode: <strong>SIM</strong></p>
+    </header>
 
-    <!-- Top metrics -->
-    <div class="row" style="margin-bottom:8px">
+    <section class="metrics-row" aria-label="Top metrics">
       <div class="metrics">
-        <div class="metric"><div class="k">ETH Live Price</div><div class="v" id="mPrice">—</div></div>
-        <div class="metric"><div class="k">Balance (USDT)</div><div class="v" id="mBalance">—</div></div>
-        <div class="metric"><div class="k">High / Low Box</div><div class="v" id="mBox">—</div></div>
-        <div class="metric"><div class="k">Status</div><div class="v green" id="mConn">Ready</div></div>
-      </div>
-    </div>
-
-    <!-- Tabs -->
-    <div class="tabs" id="tabs">
-      <button class="tab-btn active" data-tab="live">Live Market</button>
-      <button class="tab-btn" data-tab="trade">Active Trade</button>
-      <button class="tab-btn" data-tab="today">Today Orders</button>
-      <button class="tab-btn" data-tab="history">Order History</button>
-    </div>
-
-    <!-- TAB: LIVE -->
-    <section class="grid tab-panel" id="tab-live" style="display:block">
-      <div class="card">
-        <h3>Live Market</h3>
-        <div class="row">
-          <span class="pill">Symbol: <b>ETH/USDT</b></span>
-          <span class="pill">Interval: <b>15m</b></span>
-          <span class="pill">TP: <b>24</b> pts</span>
-          <span class="pill">Max SL: <b>24</b> pts</span>
-          <span class="pill">SL Shift: <b>+15</b> pts</span>
+        <div class="metric">
+          <p class="k">ETH Live Price</p>
+          <p class="v" id="mPrice">—</p>
         </div>
-        <div class="spacer"></div>
-        <div class="note">Data auto-refreshes from backend API.</div>
-      </div>
-      <div class="card half">
-        <h3>Strategy Filters (current candle)</h3>
-        <div class="row">
-          <div class="metric"><div class="k">Range ≥ 10</div><div class="v" id="fRange">—</div></div>
-          <div class="metric"><div class="k">ADX-proxy &gt; 22</div><div class="v" id="fAdx">—</div></div>
-          <div class="metric"><div class="k">ATR(14) in [12,40]</div><div class="v" id="fAtr">—</div></div>
-          <div class="metric"><div class="k">Vol &gt; SMA20×1.20</div><div class="v" id="fVol">—</div></div>
-          <div class="metric"><div class="k">1H Trend</div><div class="v" id="fTrend">—</div></div>
+        <div class="metric">
+          <p class="k">Balance (USDT)</p>
+          <p class="v" id="mBalance">—</p>
         </div>
-      </div>
-      <div class="card half">
-        <h3>Quick Actions</h3>
-        <div class="row">
-          <button class="btn" onclick="ui.mockTick()">Simulate Tick</button>
-          <button class="btn" onclick="ui.mockSignal('BUY')">Mock BUY Signal</button>
-          <button class="btn" onclick="ui.mockSignal('SELL')">Mock SELL Signal</button>
-          <button class="btn danger" onclick="ui.resetAll()">Reset UI</button>
+        <div class="metric">
+          <p class="k">High / Low Box</p>
+          <p class="v" id="mBox">—</p>
+        </div>
+        <div class="metric">
+          <p class="k">Status</p>
+          <p class="v green" id="mConn">Ready</p>
         </div>
       </div>
     </section>
 
-    <!-- TAB: TRADE -->
-    <section class="grid tab-panel" id="tab-trade" style="display:none">
-      <div class="card">
-        <h3>Active Trade</h3>
-        <div class="row">
-          <div class="metric"><div class="k">Entry</div><div class="v" id="tEntry">—</div></div>
-          <div class="metric"><div class="k">Side</div><div class="v" id="tSide">—</div></div>
-          <div class="metric"><div class="k">SL</div><div class="v" id="tSL">—</div></div>
-          <div class="metric"><div class="k">Target</div><div class="v" id="tTP">—</div></div>
-          <div class="metric"><div class="k">P&amp;L</div><div class="v" id="tPnL">—</div></div>
-        </div>
-      </div>
-    </section>
+    <nav class="tabs" aria-label="Dashboard views" role="tablist">
+      <button type="button" class="tab-btn" id="tab-btn-live" role="tab" aria-controls="tab-live" aria-selected="true">Live Market</button>
+      <button type="button" class="tab-btn" id="tab-btn-trade" role="tab" aria-controls="tab-trade" aria-selected="false" tabindex="-1">Active Trade</button>
+      <button type="button" class="tab-btn" id="tab-btn-today" role="tab" aria-controls="tab-today" aria-selected="false" tabindex="-1">Today Orders</button>
+      <button type="button" class="tab-btn" id="tab-btn-history" role="tab" aria-controls="tab-history" aria-selected="false" tabindex="-1">Order History</button>
+    </nav>
 
-    <!-- TAB: TODAY -->
-    <section class="grid tab-panel" id="tab-today" style="display:none">
-      <div class="card">
-        <h3>Today's Orders</h3>
-        <div class="table-wrap scroll-400">
-          <table id="tblToday">
-            <thead><tr>
-              <th>Sr</th><th>Entry</th><th>Exit</th><th class="center">Result</th><th class="right">P&amp;L</th><th>Time</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
+    <main>
+      <section class="grid tab-panel" id="tab-live" role="tabpanel" aria-labelledby="tab-btn-live">
+        <div class="card">
+          <h3>Live Market</h3>
+          <div class="row">
+            <span class="pill">Symbol: <strong>ETH/USDT</strong></span>
+            <span class="pill">Interval: <strong>15m</strong></span>
+            <span class="pill">TP: <strong>24</strong> pts</span>
+            <span class="pill">Max SL: <strong>24</strong> pts</span>
+            <span class="pill">SL Shift: <strong>+15</strong> pts</span>
+          </div>
+          <div class="spacer" aria-hidden="true"></div>
+          <p class="note">Data auto-refreshes from backend API.</p>
         </div>
-      </div>
-    </section>
 
-    <!-- TAB: HISTORY -->
-    <section class="grid tab-panel" id="tab-history" style="display:none">
-      <div class="card">
-        <h3>Order History</h3>
-        <div class="table-wrap scroll-400">
-          <table id="tblHistory">
-            <thead><tr>
-              <th>Sr</th><th>Entry</th><th>Exit</th><th class="center">Result</th><th class="right">P&amp;L</th><th>Time</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
+        <div class="card half">
+          <h3>Strategy Filters (current candle)</h3>
+          <div class="row">
+            <div class="metric">
+              <p class="k">Range ≥ 10</p>
+              <p class="v" id="fRange">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">ADX-proxy &gt; 22</p>
+              <p class="v" id="fAdx">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">ATR(14) in [12,40]</p>
+              <p class="v" id="fAtr">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">Vol &gt; SMA20×1.20</p>
+              <p class="v" id="fVol">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">1H Trend</p>
+              <p class="v" id="fTrend">—</p>
+            </div>
+          </div>
         </div>
-      </div>
-    </section>
 
-    <div class="footer">
+        <div class="card half">
+          <h3>Quick Actions</h3>
+          <div class="row">
+            <button type="button" class="btn" data-action="mock-tick">Simulate Tick</button>
+            <button type="button" class="btn primary" data-action="mock-signal" data-signal="BUY">Mock BUY Signal</button>
+            <button type="button" class="btn primary" data-action="mock-signal" data-signal="SELL">Mock SELL Signal</button>
+            <button type="button" class="btn danger" data-action="reset">Reset UI</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid tab-panel" id="tab-trade" role="tabpanel" aria-labelledby="tab-btn-trade" hidden>
+        <div class="card">
+          <h3>Active Trade</h3>
+          <div class="row">
+            <div class="metric">
+              <p class="k">Entry</p>
+              <p class="v" id="tEntry">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">Side</p>
+              <p class="v" id="tSide">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">SL</p>
+              <p class="v" id="tSL">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">Target</p>
+              <p class="v" id="tTP">—</p>
+            </div>
+            <div class="metric">
+              <p class="k">P&amp;L</p>
+              <p class="v" id="tPnL">—</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid tab-panel" id="tab-today" role="tabpanel" aria-labelledby="tab-btn-today" hidden>
+        <div class="card">
+          <h3>Today's Orders</h3>
+          <div class="table-wrap scroll-400">
+            <table id="tblToday">
+              <caption class="sr-only">Today's order executions</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Sr</th>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Exit</th>
+                  <th scope="col" class="center">Result</th>
+                  <th scope="col" class="right">P&amp;L</th>
+                  <th scope="col">Time</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid tab-panel" id="tab-history" role="tabpanel" aria-labelledby="tab-btn-history" hidden>
+        <div class="card">
+          <h3>Order History</h3>
+          <div class="table-wrap scroll-400">
+            <table id="tblHistory">
+              <caption class="sr-only">Historical order executions</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Sr</th>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Exit</th>
+                  <th scope="col" class="center">Result</th>
+                  <th scope="col" class="right">P&amp;L</th>
+                  <th scope="col">Time</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
       © Strategy UI • Tabs: Live Market / Active Trade / Today Orders / Order History
-    </div>
+    </footer>
   </div>
-<script>
-const ui = {
-  setPrice: v=>document.getElementById("mPrice").innerText=v,
-  setBalance: v=>document.getElementById("mBalance").innerText=v,
-  setBox: v=>document.getElementById("mBox").innerText=v,
-  setFilter: (id,v)=>document.getElementById(id).innerText=v,
-  mockTick: ()=>{ui.setPrice((Math.random()*1000+4000).toFixed(2))},
-  mockSignal: s=>alert("Mock "+s+" signal"),
-  resetAll: ()=>location.reload()
-};
 
-// auto refresh from backend
-async function refresh(){
-  try {
-    let p = await fetch("/price").then(res => res.json());
-    ui.setPrice(p.price);
+  <script>
+    (() => {
+      const REFRESH_INTERVAL_MS = 3000;
+      const DEFAULT_BALANCE = 10000;
+      const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+      const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
-    let b = await fetch("/box").then(res => res.json());
-    ui.setBox(b.box);
+      const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
+      const tabPanels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
 
-    ui.setBalance(10000);
+      function showTab(targetId) {
+        tabButtons.forEach((btn) => {
+          const controls = btn.getAttribute('aria-controls');
+          const isActive = controls === targetId;
+          btn.setAttribute('aria-selected', String(isActive));
+          btn.setAttribute('tabindex', isActive ? '0' : '-1');
+          btn.classList.toggle('active', isActive);
+        });
 
-    let filters = await fetch("/strategy-filters").then(res => res.json());
-    ui.setFilter("fRange", filters.range);
-    ui.setFilter("fAdx", filters.adx_proxy);
-    ui.setFilter("fAtr", filters.atr_14);
-    ui.setFilter("fVol", filters.volume_status);
-    ui.setFilter("fTrend", filters.one_hour_trend);
-  } catch (error) {
-    console.error(error);
-  }
-}
-setInterval(refresh,3000);
-refresh();
+        tabPanels.forEach((panel) => {
+          const shouldShow = panel.id === targetId;
+          panel.toggleAttribute('hidden', !shouldShow);
+        });
+      }
 
-// tab switching
-document.querySelectorAll(".tab-btn").forEach(btn=>{
-  btn.addEventListener("click",()=>{
-    document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll(".tab-panel").forEach(p=>p.style.display="none");
-    document.getElementById("tab-"+btn.dataset.tab).style.display="block";
-  })
-});
-</script>
- </body>
+      function focusNextTab(currentIndex, direction) {
+        const tabsCount = tabButtons.length;
+        let index = currentIndex;
+
+        do {
+          index = (index + direction + tabsCount) % tabsCount;
+        } while (tabButtons[index].hasAttribute('disabled') && index !== currentIndex);
+
+        tabButtons[index].focus();
+        showTab(tabButtons[index].getAttribute('aria-controls'));
+      }
+
+      tabButtons.forEach((button, index) => {
+        button.addEventListener('click', () => {
+          showTab(button.getAttribute('aria-controls'));
+        });
+
+        button.addEventListener('keydown', (event) => {
+          if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            focusNextTab(index, 1);
+          } else if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            focusNextTab(index, -1);
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            tabButtons[0].focus();
+            showTab(tabButtons[0].getAttribute('aria-controls'));
+          } else if (event.key === 'End') {
+            event.preventDefault();
+            const lastTab = tabButtons[tabButtons.length - 1];
+            lastTab.focus();
+            showTab(lastTab.getAttribute('aria-controls'));
+          }
+        });
+      });
+
+      showTab(tabButtons[0].getAttribute('aria-controls'));
+
+      const getElement = (id) => document.getElementById(id);
+
+      const formatNumeric = (value, options) => {
+        if (value === null || value === undefined || value === '') {
+          return '—';
+        }
+        const numericValue = Number(value);
+        if (Number.isFinite(numericValue)) {
+          return numericValue.toLocaleString(undefined, options);
+        }
+        return String(value);
+      };
+
+      const setText = (id, value) => {
+        const element = getElement(id);
+        if (element) {
+          element.textContent = value ?? '—';
+        }
+      };
+
+      const ui = {
+        setPrice: (value) => setText('mPrice', formatNumeric(value, PRICE_FORMAT)),
+        setBalance: (value) => setText('mBalance', formatNumeric(value, BALANCE_FORMAT)),
+        setBox: (value) => setText('mBox', value),
+        setFilter: (id, value) => setText(id, value),
+        setTradeMetric: (id, value) => setText(id, value),
+        mockTick: () => {
+          const randomPrice = (Math.random() * 1000 + 4000).toFixed(2);
+          ui.setPrice(randomPrice);
+        },
+        mockSignal: (signal) => {
+          window.alert(`Mock ${signal} signal`);
+        },
+        resetAll: () => {
+          window.location.reload();
+        },
+      };
+
+      window.ui = ui;
+
+      const actionHandlers = {
+        'mock-tick': () => ui.mockTick(),
+        'mock-signal': (button) => {
+          const signal = button.getAttribute('data-signal') || '';
+          ui.mockSignal(signal);
+        },
+        reset: () => ui.resetAll(),
+      };
+
+      document.querySelectorAll('[data-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const actionName = button.getAttribute('data-action');
+          const handler = actionHandlers[actionName];
+          if (handler) {
+            handler(button);
+          }
+        });
+      });
+
+      const safeJsonFetch = async (endpoint) => {
+        const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+        if (!response.ok) {
+          throw new Error(`Request failed with status ${response.status}`);
+        }
+        return response.json();
+      };
+
+      const refresh = async () => {
+        const requests = await Promise.allSettled([
+          safeJsonFetch('/price'),
+          safeJsonFetch('/box'),
+          safeJsonFetch('/strategy-filters'),
+        ]);
+
+        const [priceResult, boxResult, filtersResult] = requests;
+
+        if (priceResult.status === 'fulfilled') {
+          ui.setPrice(priceResult.value?.price);
+        }
+
+        if (boxResult.status === 'fulfilled') {
+          ui.setBox(boxResult.value?.box ?? '—');
+        }
+
+        if (filtersResult.status === 'fulfilled') {
+          const filters = filtersResult.value;
+          ui.setFilter('fRange', filters?.range ?? '—');
+          ui.setFilter('fAdx', filters?.adx_proxy ?? '—');
+          ui.setFilter('fAtr', filters?.atr_14 ?? '—');
+          ui.setFilter('fVol', filters?.volume_status ?? '—');
+          ui.setFilter('fTrend', filters?.one_hour_trend ?? '—');
+        }
+      };
+
+      ui.setBalance(DEFAULT_BALANCE);
+
+      refresh().catch((error) => {
+        console.error('Initial refresh failed', error);
+      });
+
+      setInterval(() => {
+        refresh().catch((error) => {
+          console.error('Refresh failed', error);
+        });
+      }, REFRESH_INTERVAL_MS);
+    })();
+  </script>
+</body>
 </html>
