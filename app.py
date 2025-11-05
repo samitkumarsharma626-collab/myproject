@@ -15,76 +15,108 @@ from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
-# Load environment variables
-load_dotenv()
+from app_settings import settings
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return str(payload)
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+root_logger = logging.getLogger()
+root_logger.handlers = [handler]
+root_logger.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-class Config:
-    """Application configuration"""
-    API_KEY: str = os.getenv("DELTA_API_KEY", "")
-    API_SECRET: str = os.getenv("DELTA_API_SECRET", "")
-    BASE_URL: str = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
-    SYMBOL: str = os.getenv("TRADING_SYMBOL", "ETHUSD")
-    RESOLUTION: str = os.getenv("CANDLE_RESOLUTION", "15m")
-    
-    # File paths - support both dev and production
-    STATIC_DIR: Path = Path(os.getenv("STATIC_DIR", "./static"))
-    
-    # API settings
-    REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "10"))
-    
-    # Validate critical settings
-    @classmethod
-    def validate(cls) -> None:
-        """Validate required configuration"""
-        if not cls.API_KEY or cls.API_KEY == "YOUR_API_KEY":
-            logger.warning("API_KEY not configured - some endpoints will not work")
-        if not cls.API_SECRET or cls.API_SECRET == "YOUR_API_SECRET":
-            logger.warning("API_SECRET not configured - some endpoints will not work")
-        if not cls.STATIC_DIR.exists():
-            logger.warning(f"Static directory not found: {cls.STATIC_DIR}")
-
-# Validate configuration on startup
-Config.validate()
+# Basic settings validation at import time
+if not settings.static_dir.exists():
+    logger.warning(f"Static directory not found: {settings.static_dir}")
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="ETH Strategy Dashboard API",
+    title=settings.app_name,
     description="Real-time ETH strategy monitoring and trading API",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
 
-# Add CORS middleware
+# Security middlewares
+if settings.security.force_https:
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.security.allowed_hosts,
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=settings.security.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    try:
+        response: Response = await call_next(request)
+    except HTTPException as exc:
+        # Centralized 4xx/5xx handling to ensure JSON and no sensitive leakage
+        status = exc.status_code
+        detail = exc.detail if settings.debug else (
+            "Bad Request" if 400 <= status < 500 else "Server Error"
+        )
+        response = JSONResponse(status_code=status, content={"error": detail})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Unhandled exception", exc_info=True)
+        content = {"error": "Server Error"}
+        if settings.debug:
+            content["detail"] = str(exc)
+        response = JSONResponse(status_code=500, content=content)
+
+    # Strict security headers
+    csp = " ".join([
+        f"default-src {settings.security.csp_default_src};",
+        f"script-src {' '.join(settings.security.csp_script_src)};",
+        f"style-src {' '.join(settings.security.csp_style_src)};",
+        f"img-src {' '.join(settings.security.csp_img_src)};",
+        "object-src 'none';",
+        "base-uri 'self';",
+        "frame-ancestors 'none';",
+    ])
+    response.headers["Content-Security-Policy"] = csp
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    # In prod only, enable HSTS
+    if settings.is_production():
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    return response
+
 # Mount static files if directory exists
-if Config.STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(Config.STATIC_DIR)), name="static")
-    logger.info(f"Static files mounted from {Config.STATIC_DIR}")
+if settings.static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
+    logger.info(f"Static files mounted from {settings.static_dir}")
 else:
-    logger.warning(f"Static directory not found: {Config.STATIC_DIR}")
+    logger.warning(f"Static directory not found: {settings.static_dir}")
 
 # Helper Functions
 def create_signature(method: str, timestamp: str, path: str, body: str = "") -> str:
@@ -102,7 +134,7 @@ def create_signature(method: str, timestamp: str, path: str, body: str = "") -> 
     """
     message = method + timestamp + path + body
     signature = hmac.new(
-        Config.API_SECRET.encode('utf-8'),
+        (settings.delta_api_secret or "").encode('utf-8'),
         message.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
@@ -126,7 +158,7 @@ def get_auth_headers(method: str, path: str, body: str = "") -> Dict[str, str]:
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "api-key": Config.API_KEY,
+        "api-key": settings.delta_api_key or "",
         "signature": signature,
         "timestamp": timestamp,
         "User-Agent": "ethbot-fastapi/1.0"
@@ -152,7 +184,7 @@ def safe_api_request(url: str, headers: Optional[Dict[str, str]] = None,
         if headers is None:
             headers = {"Accept": "application/json"}
         
-        response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        response = requests.get(url, headers=headers, timeout=settings.request_timeout_seconds)
         response.raise_for_status()
         
         data = response.json()
@@ -343,7 +375,7 @@ def fetch_candle_data(symbol: str, resolution: str, limit: int = 200) -> pd.Data
 @app.get("/")
 async def root():
     """Serve the main dashboard HTML"""
-    index_file = Config.STATIC_DIR / "index.html"
+    index_file = settings.static_dir / "index.html"
     
     if not index_file.exists():
         logger.error(f"index.html not found at {index_file}")
@@ -363,7 +395,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "1.0.0",
-        "mode": os.getenv("APP_MODE", "PRODUCTION")
+        "mode": settings.environment
     })
 
 @app.get("/api/v1/price")
@@ -375,8 +407,8 @@ async def get_current_price():
         JSON with symbol and current price
     """
     try:
-        url = f"{Config.BASE_URL}/v2/tickers/{Config.SYMBOL}"
-        logger.info(f"Fetching price for {Config.SYMBOL}")
+        url = f"{settings.delta_base_url}/v2/tickers/{settings.trading_symbol}"
+        logger.info("Fetching price", extra={"symbol": settings.trading_symbol})
         
         data = safe_api_request(url)
         
@@ -395,7 +427,7 @@ async def get_current_price():
         logger.info(f"Price fetched successfully: {price}")
         
         return JSONResponse({
-            "symbol": Config.SYMBOL,
+            "symbol": settings.trading_symbol,
             "price": round(price, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "delta_exchange"
@@ -422,13 +454,13 @@ async def get_wallet_balance():
         JSON with balance information
     """
     # Validate credentials
-    if not Config.API_KEY or Config.API_KEY == "YOUR_API_KEY":
+    if not settings.delta_api_key:
         raise HTTPException(
             status_code=401, 
             detail="API credentials not configured. Set DELTA_API_KEY environment variable."
         )
-    
-    if not Config.API_SECRET or Config.API_SECRET == "YOUR_API_SECRET":
+
+    if not settings.delta_api_secret:
         raise HTTPException(
             status_code=401,
             detail="API secret not configured. Set DELTA_API_SECRET environment variable."
@@ -439,7 +471,7 @@ async def get_wallet_balance():
         path = "/v2/wallet/balances"
         
         headers = get_auth_headers(method, path)
-        url = Config.BASE_URL + path
+        url = str(settings.delta_base_url) + path
         
         logger.info("Fetching wallet balance")
         data = safe_api_request(url, headers=headers, authenticated=True)
@@ -496,7 +528,7 @@ async def get_price_box():
         JSON with high/low price range
     """
     try:
-        url = f"{Config.BASE_URL}/v2/tickers/{Config.SYMBOL}"
+        url = f"{settings.delta_base_url}/v2/tickers/{settings.trading_symbol}"
         data = safe_api_request(url)
         
         result = data.get("result", {})
@@ -551,13 +583,13 @@ async def get_strategy_filters():
         logger.info("Calculating strategy filters...")
         
         # Fetch 15m candle data (need enough for calculations)
-        df_15m = fetch_candle_data(Config.SYMBOL, '15m', limit=200)
+        df_15m = fetch_candle_data(settings.trading_symbol, '15m', limit=200)
         
         if df_15m.empty or len(df_15m) < 50:
             raise HTTPException(status_code=404, detail="Insufficient candle data for calculations")
         
         # Fetch 1h candle data for trend analysis
-        df_1h = fetch_candle_data(Config.SYMBOL, '1h', limit=250)
+        df_1h = fetch_candle_data(settings.trading_symbol, '1h', limit=250)
         
         # Get current (latest) candle data
         current = df_15m.iloc[-1]
@@ -625,7 +657,7 @@ async def get_strategy_filters():
         
         # Prepare response
         response = {
-            "symbol": Config.SYMBOL,
+            "symbol": settings.trading_symbol,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             
             # Current candle info
@@ -713,10 +745,10 @@ async def get_candles(limit: int = 100):
         end_time = int(time.time())
         start_time = end_time - (limit * 15 * 60)  # 15 minutes per candle
         
-        url = f"{Config.BASE_URL}/v2/history/candles"
+        url = f"{settings.delta_base_url}/v2/history/candles"
         params = {
-            "resolution": Config.RESOLUTION,
-            "symbol": Config.SYMBOL,
+            "resolution": settings.candle_resolution,
+            "symbol": settings.trading_symbol,
             "start": start_time,
             "end": end_time
         }
@@ -729,8 +761,8 @@ async def get_candles(limit: int = 100):
         logger.info(f"Fetched {len(candles)} candles")
         
         return JSONResponse({
-            "symbol": Config.SYMBOL,
-            "resolution": Config.RESOLUTION,
+            "symbol": settings.trading_symbol,
+            "resolution": settings.candle_resolution,
             "candles": candles,
             "count": len(candles),
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -772,11 +804,11 @@ async def startup_event():
     """Log startup information"""
     logger.info("=" * 50)
     logger.info("ETH Strategy Dashboard API Starting")
-    logger.info(f"Symbol: {Config.SYMBOL}")
-    logger.info(f"Resolution: {Config.RESOLUTION}")
-    logger.info(f"Base URL: {Config.BASE_URL}")
-    logger.info(f"Static Dir: {Config.STATIC_DIR}")
-    logger.info(f"API Key configured: {'Yes' if Config.API_KEY and Config.API_KEY != 'YOUR_API_KEY' else 'No'}")
+    logger.info(f"Symbol: {settings.trading_symbol}")
+    logger.info(f"Resolution: {settings.candle_resolution}")
+    logger.info(f"Base URL: {settings.delta_base_url}")
+    logger.info(f"Static Dir: {settings.static_dir}")
+    logger.info(f"API Key configured: {'Yes' if bool(settings.delta_api_key) else 'No'}")
     logger.info("=" * 50)
 
 # Shutdown event
@@ -789,8 +821,8 @@ if __name__ == "__main__":
     import uvicorn
     
     # Run server
-    port = int(os.getenv("PORT", "8000"))
-    host = os.getenv("HOST", "0.0.0.0")
+    port = settings.port
+    host = settings.host
     
     logger.info(f"Starting server on {host}:{port}")
     
@@ -798,6 +830,6 @@ if __name__ == "__main__":
         "app:app",
         host=host,
         port=port,
-        reload=os.getenv("DEBUG", "false").lower() == "true",
+        reload=settings.debug,
         log_level="info"
     )
