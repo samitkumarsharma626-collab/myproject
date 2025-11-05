@@ -1,0 +1,32 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+env/
+venv/
+
+# Environment and secret files
+.env
+*.env
+*.env.*
+secrets/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Node/npm caches (if any frontend tooling is added later)
+node_modules/
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Reports
+reports/

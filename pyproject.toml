@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "C", "S", "T"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S311"]
+"scripts/deploy_hostinger.sh" = ["S605", "S607"]
+"app/config.py" = ["S104"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+ignore_missing_imports = true
+plugins = []
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
