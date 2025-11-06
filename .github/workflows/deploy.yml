@@ -20,7 +20,9 @@ jobs:
           username: root
           key: ${{ secrets.HOSTINGER_SSH_KEY }}
           script: |
-            cd /root/myproject || cd /var/www/html || exit 1
-            git pull origin main
-            systemctl restart nginx || echo "⚠️ Restart skipped (nginx not found)"
-            echo "✅ Deployment done successfully!"
+              cd /root/myproject || cd /var/www/html || exit 1
+              git pull origin main
+              echo "🔄 Restarting services..."
+              systemctl restart myproject.service || echo "⚠️ Restart skipped (myproject.service not found)"
+              systemctl restart nginx || echo "⚠️ Restart skipped (nginx not found)"
+              echo "✅ Deployment done successfully!"
