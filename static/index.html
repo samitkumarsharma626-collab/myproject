@@ -457,8 +457,8 @@
 
   <script>
     (() => {
-      const REFRESH_INTERVAL_MS = 3000;
-      const DEFAULT_BALANCE = 10000;
+      const DATA_REFRESH_INTERVAL_MS = 3000;
+      const BALANCE_REFRESH_INTERVAL_MS = 30000;
       const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
       const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
@@ -586,6 +586,33 @@
         return response.json();
       };
 
+      const balanceState = {
+        hasLoaded: false,
+      };
+
+      const updateBalance = async () => {
+        if (!balanceState.hasLoaded) {
+          setText('mBalance', 'Loading…');
+        }
+
+        try {
+          const data = await safeJsonFetch('/api/balance');
+
+          if (data?.available && data?.balance !== undefined) {
+            ui.setBalance(data.balance);
+          } else if (data?.message) {
+            setText('mBalance', data.message);
+          } else {
+            setText('mBalance', 'Unavailable');
+          }
+
+          balanceState.hasLoaded = true;
+        } catch (error) {
+          console.error('Balance refresh failed', error);
+          setText('mBalance', balanceState.hasLoaded ? 'Error' : 'Unavailable');
+        }
+      };
+
       const refresh = async () => {
         const requests = await Promise.allSettled([
           safeJsonFetch('/price'),
@@ -613,17 +640,21 @@
         }
       };
 
-      ui.setBalance(DEFAULT_BALANCE);
+      void updateBalance();
 
       refresh().catch((error) => {
         console.error('Initial refresh failed', error);
       });
 
       setInterval(() => {
+        void updateBalance();
+      }, BALANCE_REFRESH_INTERVAL_MS);
+
+      setInterval(() => {
         refresh().catch((error) => {
           console.error('Refresh failed', error);
         });
-      }, REFRESH_INTERVAL_MS);
+      }, DATA_REFRESH_INTERVAL_MS);
     })();
   </script>
 </body>

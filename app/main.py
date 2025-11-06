@@ -173,35 +173,42 @@ def register_price_routes(app: FastAPI) -> None:
         return await get_price_box(settings)
 
 
-def register_balance_routes(app: FastAPI) -> None:
-    @app.get("/api/v1/balance", response_model=BalanceResponse)
-    async def get_wallet_balance(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
-        api_key = settings.get_api_key()
-        api_secret = settings.get_api_secret()
+def _fetch_wallet_balance(settings: AppSettings, preferred_asset: str | None = None) -> BalanceResponse:
+    api_key = settings.get_api_key()
+    api_secret = settings.get_api_secret()
 
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=401, detail="API credentials not configured")
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=401, detail="API credentials not configured")
 
-        method = "GET"
-        path = "/v2/wallet/balances"
-        headers = get_auth_headers(method, path, settings)
-        url = f"{settings.delta_base_url}{path}"
+    method = "GET"
+    path = "/v2/wallet/balances"
+    headers = get_auth_headers(method, path, settings)
+    url = f"{settings.delta_base_url}{path}"
 
-        logger.info("Fetching wallet balance", extra={"event": "balance_lookup"})
-        data = safe_api_request(url=url, headers=headers, settings=settings, authenticated=True)
+    logger.info(
+        "Fetching wallet balance",
+        extra={
+            "event": "balance_lookup",
+            "preferred_asset": preferred_asset,
+        },
+    )
+    data = safe_api_request(url=url, headers=headers, settings=settings, authenticated=True)
 
-        assets = data.get("result", [])
-        supported_assets = {"USD", "USDT", "USDC", "MARGIN", "CASH"}
+    assets = data.get("result", [])
+    timestamp = datetime.now(timezone.utc)
 
-        asset = next((item for item in assets if item.get("asset_symbol") in supported_assets), None)
+    def find_asset(symbol: str) -> dict[str, Any] | None:
+        return next((item for item in assets if item.get("asset_symbol") == symbol), None)
 
-        timestamp = datetime.now(timezone.utc)
-
-        if not asset:
+    target_asset = None
+    if preferred_asset:
+        target_asset = find_asset(preferred_asset)
+        if not target_asset:
             logger.warning(
-                "No supported asset found",
+                "Preferred asset not found",
                 extra={
                     "event": "balance_missing",
+                    "preferred_asset": preferred_asset,
                     "assets": [item.get("asset_symbol") for item in assets],
                 },
             )
@@ -210,27 +217,74 @@ def register_balance_routes(app: FastAPI) -> None:
                 asset=None,
                 timestamp=timestamp,
                 available=False,
-                message=f"No {', '.join(sorted(supported_assets))} asset found",
+                message=f"{preferred_asset} balance not available",
             )
 
-        balance_value = float(asset.get("available_balance") or asset.get("balance") or 0)
-        asset_symbol = asset.get("asset_symbol")
+    if not target_asset:
+        fallback_assets = ["USDT", "USDC", "USD", "CASH", "MARGIN"]
+        if preferred_asset:
+            fallback_assets = [symbol for symbol in fallback_assets if symbol != preferred_asset]
 
-        logger.info(
-            "Wallet balance fetched",
-            extra={"event": "balance_success", "asset": asset_symbol},
+        target_asset = next(
+            (
+                item
+                for symbol in fallback_assets
+                for item in assets
+                if item.get("asset_symbol") == symbol
+            ),
+            None,
         )
 
+    if not target_asset:
+        logger.warning(
+            "No supported asset found",
+            extra={
+                "event": "balance_missing",
+                "preferred_asset": preferred_asset,
+                "assets": [item.get("asset_symbol") for item in assets],
+            },
+        )
+        supported_assets = ["USDT", "USDC", "USD", "CASH", "MARGIN"]
         return BalanceResponse(
-            balance=round(balance_value, 2),
-            asset=asset_symbol,
+            balance=0.0,
+            asset=None,
             timestamp=timestamp,
-            available=True,
+            available=False,
+            message=f"No {', '.join(supported_assets)} asset found",
         )
+
+    balance_value = float(target_asset.get("available_balance") or target_asset.get("balance") or 0)
+    asset_symbol = target_asset.get("asset_symbol")
+
+    logger.info(
+        "Wallet balance fetched",
+        extra={
+            "event": "balance_success",
+            "asset": asset_symbol,
+            "preferred_asset": preferred_asset,
+        },
+    )
+
+    return BalanceResponse(
+        balance=round(balance_value, 2),
+        asset=asset_symbol,
+        timestamp=timestamp,
+        available=True,
+    )
+
+
+def register_balance_routes(app: FastAPI) -> None:
+    @app.get("/api/v1/balance", response_model=BalanceResponse)
+    async def get_wallet_balance(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
+        return _fetch_wallet_balance(settings)
+
+    @app.get("/api/balance", response_model=BalanceResponse)
+    async def get_usdt_wallet_balance(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
+        return _fetch_wallet_balance(settings, preferred_asset="USDT")
 
     @app.get("/balance", response_model=BalanceResponse)
     async def get_balance_legacy(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
-        return await get_wallet_balance(settings)
+        return _fetch_wallet_balance(settings)
 
 
 def register_strategy_routes(app: FastAPI) -> None:
