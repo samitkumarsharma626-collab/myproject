@@ -36,13 +36,14 @@
       padding: 0 16px;
     }
 
-    .header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 16px;
-      gap: 16px;
-    }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
 
     .title {
       margin: 0;
@@ -60,12 +61,12 @@
       margin: 0;
     }
 
-    .tabs {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 12px 0 16px;
-    }
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 12px 0 16px;
+      }
 
     .tab-btn {
       padding: 10px 14px;
@@ -140,13 +141,14 @@
       gap: 16px;
     }
 
-    .metric {
-      background: #0f1320;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 12px;
-      min-width: 140px;
-    }
+      .metric {
+        background: #0f1320;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        min-width: 140px;
+        flex: 1 1 160px;
+      }
 
     .metric .k {
       font-size: 12px;
@@ -288,6 +290,31 @@
       clip: rect(0, 0, 0, 0);
       border: 0;
     }
+
+      @media (max-width: 640px) {
+        .header {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .tabs {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .tabs::-webkit-scrollbar {
+          height: 4px;
+        }
+
+        .tabs::-webkit-scrollbar-thumb {
+          background: var(--border);
+          border-radius: 999px;
+        }
+
+        .metric {
+          min-width: 120px;
+        }
+      }
   </style>
 </head>
 <body>
@@ -558,60 +585,74 @@
           },
         };
 
-        window.ui = ui;
+          window.ui = ui;
 
-        const actionHandlers = {
-          'mock-tick': () => ui.mockTick(),
-          'mock-signal': (button) => {
-            const signal = button.getAttribute('data-signal') || '';
-            ui.mockSignal(signal);
-          },
-          reset: () => ui.resetAll(),
-        };
+          const actionHandlers = {
+            'mock-tick': () => ui.mockTick(),
+            'mock-signal': (button) => {
+              const signal = button.getAttribute('data-signal') || '';
+              ui.mockSignal(signal);
+            },
+            reset: () => ui.resetAll(),
+          };
 
-        document.querySelectorAll('[data-action]').forEach((button) => {
-          button.addEventListener('click', () => {
-            const actionName = button.getAttribute('data-action');
-            const handler = actionHandlers[actionName];
-            if (handler) {
-              handler(button);
-            }
+          document.querySelectorAll('[data-action]').forEach((button) => {
+            button.addEventListener('click', () => {
+              const actionName = button.getAttribute('data-action');
+              const handler = actionHandlers[actionName];
+              if (handler) {
+                handler(button);
+              }
+            });
           });
-        });
 
-        const safeJsonFetch = async (endpoint) => {
-          const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
-          if (!response.ok) {
-            throw new Error(`Request failed with status ${response.status}`);
-          }
-          return response.json();
-        };
-
-        const refreshBalance = async ({ showLoading = false } = {}) => {
-          if (showLoading) {
-            setText('mBalance', 'Loading...');
-          }
-
-          try {
-            const payload = await safeJsonFetch(BALANCE_ENDPOINT);
-            if (payload?.available) {
-              const formattedBalance = formatNumeric(payload?.balance, BALANCE_FORMAT);
-              const displayValue = formattedBalance === '—'
-                ? formattedBalance
-                : `${formattedBalance}${payload?.asset ? ` ${payload.asset}` : ''}`;
-              setText('mBalance', displayValue);
-            } else {
-              const fallback = payload?.message || 'Balance unavailable';
-              setText('mBalance', fallback);
+          const safeJsonFetch = async (endpoint) => {
+            const response = await fetch(endpoint, {
+              headers: { Accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+            });
+            if (!response.ok) {
+              throw new Error(`Request failed with status ${response.status}`);
             }
-          } catch (error) {
-            console.error('Balance fetch failed', error);
-            setText('mBalance', 'Failed to load');
-          }
-        };
+            const contentType = response.headers.get('content-type') || '';
+            if (!contentType.toLowerCase().includes('application/json')) {
+              throw new Error(`Unexpected content type: ${contentType}`);
+            }
+            return response.json();
+          };
 
-        const refresh = async () => {
-          const requests = await Promise.allSettled([
+          const refreshBalance = async ({ showLoading = false } = {}) => {
+            if (showLoading) {
+              setText('mBalance', 'Loading...');
+            }
+
+            try {
+              const payload = await safeJsonFetch(BALANCE_ENDPOINT);
+              const hasBalance = payload && Object.prototype.hasOwnProperty.call(payload, 'balance');
+              if (hasBalance) {
+                const formattedBalance = formatNumeric(payload.balance, BALANCE_FORMAT);
+                const asset = typeof payload.asset === 'string' ? payload.asset.trim() : '';
+                const safeAsset = asset && /^[\w.-]{1,10}$/.test(asset) ? asset.toUpperCase() : '';
+                const displayValue = formattedBalance === '—'
+                  ? formattedBalance
+                  : `${formattedBalance}${safeAsset ? ` ${safeAsset}` : ''}`;
+                setText('mBalance', displayValue);
+                return;
+              }
+
+              const fallback = typeof payload?.message === 'string' && payload.message.trim()
+                ? payload.message.trim()
+                : 'Balance unavailable';
+              setText('mBalance', fallback);
+            } catch (error) {
+              console.error('Balance fetch failed', error);
+              setText('mBalance', 'Failed to load');
+            }
+          };
+
+          const refresh = async () => {
+            const requests = await Promise.allSettled([
             safeJsonFetch('/price'),
             safeJsonFetch('/box'),
             safeJsonFetch('/strategy-filters'),
