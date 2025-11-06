@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,7 +20,7 @@ jobs:
           username: root
           key: ${{ secrets.HOSTINGER_SSH_KEY }}
           script: |
-            cd /root/myproject
+            cd /root/myproject || cd /var/www/html || exit 1
             git pull origin main
-            systemctl restart myproject.service || echo "Restart skipped"
+            systemctl restart nginx || echo "⚠️ Restart skipped (nginx not found)"
             echo "✅ Deployment done successfully!"
