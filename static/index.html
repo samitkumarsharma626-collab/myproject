@@ -60,12 +60,12 @@
       margin: 0;
     }
 
-    .tabs {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 12px 0 16px;
-    }
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 12px 0 16px;
+      }
 
     .tab-btn {
       padding: 10px 14px;
@@ -140,13 +140,14 @@
       gap: 16px;
     }
 
-    .metric {
-      background: #0f1320;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 12px;
-      min-width: 140px;
-    }
+      .metric {
+        background: #0f1320;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        min-width: 140px;
+        flex: 1 1 140px;
+      }
 
     .metric .k {
       font-size: 12px;
@@ -288,6 +289,65 @@
       clip: rect(0, 0, 0, 0);
       border: 0;
     }
+
+      @media (max-width: 900px) {
+        .header {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .title {
+          font-size: 24px;
+        }
+
+        .status-chip {
+          align-self: stretch;
+          text-align: center;
+        }
+      }
+
+      @media (max-width: 700px) {
+        .metrics {
+          gap: 12px;
+        }
+
+        .metric {
+          flex: 1 1 calc(50% - 12px);
+          min-width: 120px;
+        }
+
+        .row {
+          gap: 10px;
+        }
+      }
+
+      @media (max-width: 540px) {
+        .wrap {
+          padding: 0 12px;
+        }
+
+        .tabs {
+          gap: 6px;
+        }
+
+        .tab-btn {
+          flex: 1 1 100%;
+        }
+
+        .metric {
+          flex: 1 1 100%;
+          min-width: auto;
+        }
+
+        .pill {
+          width: 100%;
+          text-align: center;
+        }
+
+        .btn {
+          flex: 1 1 100%;
+        }
+      }
   </style>
 </head>
 <body>
@@ -455,205 +515,243 @@
     </footer>
   </div>
 
-    <script>
-      (() => {
-        const REFRESH_INTERVAL_MS = 3000;
-        const BALANCE_REFRESH_INTERVAL_MS = 30000;
-        const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
-        const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
-        const BALANCE_ENDPOINT = '/api/balance';
+      <script>
+        (() => {
+          const REFRESH_INTERVAL_MS = 3000;
+          const BALANCE_REFRESH_INTERVAL_MS = 30000;
+          const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+          const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+          const BALANCE_ENDPOINT = '/api/balance';
+          const JSON_HEADERS = { Accept: 'application/json' };
 
-        const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
-        const tabPanels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+          let balanceAbortController = null;
 
-        function showTab(targetId) {
-          tabButtons.forEach((btn) => {
-            const controls = btn.getAttribute('aria-controls');
-            const isActive = controls === targetId;
-            btn.setAttribute('aria-selected', String(isActive));
-            btn.setAttribute('tabindex', isActive ? '0' : '-1');
-            btn.classList.toggle('active', isActive);
+          const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
+          const tabPanels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+
+          function showTab(targetId) {
+            tabButtons.forEach((btn) => {
+              const controls = btn.getAttribute('aria-controls');
+              const isActive = controls === targetId;
+              btn.setAttribute('aria-selected', String(isActive));
+              btn.setAttribute('tabindex', isActive ? '0' : '-1');
+              btn.classList.toggle('active', isActive);
+            });
+
+            tabPanels.forEach((panel) => {
+              const shouldShow = panel.id === targetId;
+              panel.toggleAttribute('hidden', !shouldShow);
+            });
+          }
+
+          function focusNextTab(currentIndex, direction) {
+            const tabsCount = tabButtons.length;
+            let index = currentIndex;
+
+            do {
+              index = (index + direction + tabsCount) % tabsCount;
+            } while (tabButtons[index].hasAttribute('disabled') && index !== currentIndex);
+
+            tabButtons[index].focus();
+            showTab(tabButtons[index].getAttribute('aria-controls'));
+          }
+
+          tabButtons.forEach((button, index) => {
+            button.addEventListener('click', () => {
+              showTab(button.getAttribute('aria-controls'));
+            });
+
+            button.addEventListener('keydown', (event) => {
+              if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                focusNextTab(index, 1);
+              } else if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                focusNextTab(index, -1);
+              } else if (event.key === 'Home') {
+                event.preventDefault();
+                tabButtons[0].focus();
+                showTab(tabButtons[0].getAttribute('aria-controls'));
+              } else if (event.key === 'End') {
+                event.preventDefault();
+                const lastTab = tabButtons[tabButtons.length - 1];
+                lastTab.focus();
+                showTab(lastTab.getAttribute('aria-controls'));
+              }
+            });
           });
 
-          tabPanels.forEach((panel) => {
-            const shouldShow = panel.id === targetId;
-            panel.toggleAttribute('hidden', !shouldShow);
-          });
-        }
+          showTab(tabButtons[0].getAttribute('aria-controls'));
 
-        function focusNextTab(currentIndex, direction) {
-          const tabsCount = tabButtons.length;
-          let index = currentIndex;
+          const getElement = (id) => document.getElementById(id);
 
-          do {
-            index = (index + direction + tabsCount) % tabsCount;
-          } while (tabButtons[index].hasAttribute('disabled') && index !== currentIndex);
-
-          tabButtons[index].focus();
-          showTab(tabButtons[index].getAttribute('aria-controls'));
-        }
-
-        tabButtons.forEach((button, index) => {
-          button.addEventListener('click', () => {
-            showTab(button.getAttribute('aria-controls'));
-          });
-
-          button.addEventListener('keydown', (event) => {
-            if (event.key === 'ArrowRight') {
-              event.preventDefault();
-              focusNextTab(index, 1);
-            } else if (event.key === 'ArrowLeft') {
-              event.preventDefault();
-              focusNextTab(index, -1);
-            } else if (event.key === 'Home') {
-              event.preventDefault();
-              tabButtons[0].focus();
-              showTab(tabButtons[0].getAttribute('aria-controls'));
-            } else if (event.key === 'End') {
-              event.preventDefault();
-              const lastTab = tabButtons[tabButtons.length - 1];
-              lastTab.focus();
-              showTab(lastTab.getAttribute('aria-controls'));
+          const formatNumeric = (value, options) => {
+            if (value === null || value === undefined || value === '') {
+              return '—';
             }
-          });
-        });
-
-        showTab(tabButtons[0].getAttribute('aria-controls'));
-
-        const getElement = (id) => document.getElementById(id);
-
-        const formatNumeric = (value, options) => {
-          if (value === null || value === undefined || value === '') {
-            return '—';
-          }
-          const numericValue = Number(value);
-          if (Number.isFinite(numericValue)) {
-            return numericValue.toLocaleString(undefined, options);
-          }
-          return String(value);
-        };
-
-        const setText = (id, value) => {
-          const element = getElement(id);
-          if (element) {
-            element.textContent = value ?? '—';
-          }
-        };
-
-        const ui = {
-          setPrice: (value) => setText('mPrice', formatNumeric(value, PRICE_FORMAT)),
-          setBalance: (value) => setText('mBalance', formatNumeric(value, BALANCE_FORMAT)),
-          setBox: (value) => setText('mBox', value),
-          setFilter: (id, value) => setText(id, value),
-          setTradeMetric: (id, value) => setText(id, value),
-          mockTick: () => {
-            const randomPrice = (Math.random() * 1000 + 4000).toFixed(2);
-            ui.setPrice(randomPrice);
-          },
-          mockSignal: (signal) => {
-            window.alert(`Mock ${signal} signal`);
-          },
-          resetAll: () => {
-            window.location.reload();
-          },
-        };
-
-        window.ui = ui;
-
-        const actionHandlers = {
-          'mock-tick': () => ui.mockTick(),
-          'mock-signal': (button) => {
-            const signal = button.getAttribute('data-signal') || '';
-            ui.mockSignal(signal);
-          },
-          reset: () => ui.resetAll(),
-        };
-
-        document.querySelectorAll('[data-action]').forEach((button) => {
-          button.addEventListener('click', () => {
-            const actionName = button.getAttribute('data-action');
-            const handler = actionHandlers[actionName];
-            if (handler) {
-              handler(button);
+            const numericValue = Number(value);
+            if (Number.isFinite(numericValue)) {
+              return numericValue.toLocaleString(undefined, options);
             }
-          });
-        });
+            return String(value);
+          };
 
-        const safeJsonFetch = async (endpoint) => {
-          const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
-          if (!response.ok) {
-            throw new Error(`Request failed with status ${response.status}`);
-          }
-          return response.json();
-        };
-
-        const refreshBalance = async ({ showLoading = false } = {}) => {
-          if (showLoading) {
-            setText('mBalance', 'Loading...');
-          }
-
-          try {
-            const payload = await safeJsonFetch(BALANCE_ENDPOINT);
-            if (payload?.available) {
-              const formattedBalance = formatNumeric(payload?.balance, BALANCE_FORMAT);
-              const displayValue = formattedBalance === '—'
-                ? formattedBalance
-                : `${formattedBalance}${payload?.asset ? ` ${payload.asset}` : ''}`;
-              setText('mBalance', displayValue);
-            } else {
-              const fallback = payload?.message || 'Balance unavailable';
-              setText('mBalance', fallback);
+          const setText = (id, value) => {
+            const element = getElement(id);
+            if (element) {
+              element.textContent = value ?? '—';
             }
-          } catch (error) {
-            console.error('Balance fetch failed', error);
-            setText('mBalance', 'Failed to load');
-          }
-        };
+          };
 
-        const refresh = async () => {
-          const requests = await Promise.allSettled([
-            safeJsonFetch('/price'),
-            safeJsonFetch('/box'),
-            safeJsonFetch('/strategy-filters'),
-          ]);
+          const ui = {
+            setPrice: (value) => setText('mPrice', formatNumeric(value, PRICE_FORMAT)),
+            setBalance: (value) => setText('mBalance', formatNumeric(value, BALANCE_FORMAT)),
+            setBox: (value) => setText('mBox', value),
+            setFilter: (id, value) => setText(id, value),
+            setTradeMetric: (id, value) => setText(id, value),
+            mockTick: () => {
+              const randomPrice = (Math.random() * 1000 + 4000).toFixed(2);
+              ui.setPrice(randomPrice);
+            },
+            mockSignal: (signal) => {
+              window.alert(`Mock ${signal} signal`);
+            },
+            resetAll: () => {
+              window.location.reload();
+            },
+          };
 
-          const [priceResult, boxResult, filtersResult] = requests;
+          const actionHandlers = {
+            'mock-tick': () => ui.mockTick(),
+            'mock-signal': (button) => {
+              const signal = button.getAttribute('data-signal') || '';
+              ui.mockSignal(signal);
+            },
+            reset: () => ui.resetAll(),
+          };
 
-          if (priceResult.status === 'fulfilled') {
-            ui.setPrice(priceResult.value?.price);
-          }
+          document.querySelectorAll('[data-action]').forEach((button) => {
+            button.addEventListener('click', () => {
+              const actionName = button.getAttribute('data-action');
+              const handler = actionHandlers[actionName];
+              if (handler) {
+                handler(button);
+              }
+            });
+          });
 
-          if (boxResult.status === 'fulfilled') {
-            ui.setBox(boxResult.value?.box ?? '—');
-          }
+          const safeJsonFetch = async (endpoint, { signal } = {}) => {
+            const response = await fetch(endpoint, {
+              method: 'GET',
+              headers: JSON_HEADERS,
+              credentials: 'same-origin',
+              signal,
+            });
+            if (!response.ok) {
+              throw new Error(`Request failed with status ${response.status}`);
+            }
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType && !contentType.toLowerCase().includes('application/json')) {
+              throw new Error(`Unexpected content type: ${contentType}`);
+            }
+            try {
+              return await response.json();
+            } catch (parseError) {
+              throw new Error('Invalid JSON payload received');
+            }
+          };
 
-          if (filtersResult.status === 'fulfilled') {
-            const filters = filtersResult.value;
-            ui.setFilter('fRange', filters?.range ?? '—');
-            ui.setFilter('fAdx', filters?.adx_proxy ?? '—');
-            ui.setFilter('fAtr', filters?.atr_14 ?? '—');
-            ui.setFilter('fVol', filters?.volume_status ?? '—');
-            ui.setFilter('fTrend', filters?.one_hour_trend ?? '—');
-          }
-        };
+          const refreshBalance = async ({ showLoading = false } = {}) => {
+            if (showLoading) {
+              setText('mBalance', 'Loading...');
+            }
 
-        refreshBalance({ showLoading: true });
-        refresh().catch((error) => {
-          console.error('Initial refresh failed', error);
-        });
+            const previousController = balanceAbortController;
+            if (previousController) {
+              previousController.abort();
+            }
 
-        setInterval(() => {
+            const controller = new AbortController();
+            balanceAbortController = controller;
+
+            try {
+              const payload = await safeJsonFetch(BALANCE_ENDPOINT, { signal: controller.signal });
+              const possibleKeys = ['balance', 'available_balance', 'availableBalance'];
+              let balanceValue;
+              for (const key of possibleKeys) {
+                if (payload && payload[key] !== undefined && payload[key] !== null) {
+                  balanceValue = payload[key];
+                  break;
+                }
+              }
+
+              if (balanceValue !== undefined) {
+                const formattedBalance = formatNumeric(balanceValue, BALANCE_FORMAT);
+                const asset = typeof payload?.asset === 'string' ? payload.asset.trim() : '';
+                const assetLabel = asset ? ` ${asset.replace(/[^\w./-]/g, '')}` : '';
+                const displayValue = formattedBalance === '—' ? formattedBalance : `${formattedBalance}${assetLabel}`;
+                setText('mBalance', displayValue);
+              } else {
+                const fallback = payload?.message || payload?.status || 'Balance unavailable';
+                setText('mBalance', fallback);
+              }
+            } catch (error) {
+              if (error.name === 'AbortError') {
+                return;
+              }
+              console.error('Balance fetch failed', error);
+              setText('mBalance', 'Failed to load');
+            } finally {
+              if (balanceAbortController === controller) {
+                balanceAbortController = null;
+              }
+            }
+          };
+
+          const refresh = async () => {
+            const requests = await Promise.allSettled([
+              safeJsonFetch('/price'),
+              safeJsonFetch('/box'),
+              safeJsonFetch('/strategy-filters'),
+            ]);
+
+            const [priceResult, boxResult, filtersResult] = requests;
+
+            if (priceResult.status === 'fulfilled') {
+              ui.setPrice(priceResult.value?.price);
+            }
+
+            if (boxResult.status === 'fulfilled') {
+              ui.setBox(boxResult.value?.box ?? '—');
+            }
+
+            if (filtersResult.status === 'fulfilled') {
+              const filters = filtersResult.value;
+              ui.setFilter('fRange', filters?.range ?? '—');
+              ui.setFilter('fAdx', filters?.adx_proxy ?? '—');
+              ui.setFilter('fAtr', filters?.atr_14 ?? '—');
+              ui.setFilter('fVol', filters?.volume_status ?? '—');
+              ui.setFilter('fTrend', filters?.one_hour_trend ?? '—');
+            }
+          };
+
+          refreshBalance({ showLoading: true });
           refresh().catch((error) => {
-            console.error('Refresh failed', error);
+            console.error('Initial refresh failed', error);
           });
-        }, REFRESH_INTERVAL_MS);
 
-        setInterval(() => {
-          refreshBalance().catch((error) => {
-            console.error('Balance refresh failed', error);
-          });
-        }, BALANCE_REFRESH_INTERVAL_MS);
-      })();
-    </script>
+          setInterval(() => {
+            refresh().catch((error) => {
+              console.error('Refresh failed', error);
+            });
+          }, REFRESH_INTERVAL_MS);
+
+          setInterval(() => {
+            refreshBalance().catch((error) => {
+              console.error('Balance refresh failed', error);
+            });
+          }, BALANCE_REFRESH_INTERVAL_MS);
+        })();
+      </script>
 </body>
 </html>
