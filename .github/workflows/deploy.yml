@@ -1,0 +1,55 @@
+name: Deploy to Hostinger VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to Hostinger VPS
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/hostinger_key
+          chmod 600 ~/.ssh/hostinger_key
+          ssh-keyscan -H ${{ secrets.HOSTINGER_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
+      
+      - name: Ensure scripts directory exists on VPS
+        run: |
+          ssh -i ~/.ssh/hostinger_key \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            root@${{ secrets.HOSTINGER_IP }} \
+            "mkdir -p /root/myproject/scripts"
+      
+      - name: Copy deployment script to VPS
+        run: |
+          scp -i ~/.ssh/hostinger_key \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            scripts/deploy_hostinger.sh \
+            root@${{ secrets.HOSTINGER_IP }}:/root/myproject/scripts/deploy_hostinger.sh
+      
+      - name: Make script executable on VPS
+        run: |
+          ssh -i ~/.ssh/hostinger_key \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            root@${{ secrets.HOSTINGER_IP }} \
+            "chmod +x /root/myproject/scripts/deploy_hostinger.sh"
+      
+      - name: Deploy to Hostinger VPS
+        run: |
+          ssh -i ~/.ssh/hostinger_key \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            root@${{ secrets.HOSTINGER_IP }} \
+            "cd /root/myproject && bash scripts/deploy_hostinger.sh" && \
+          echo "✅ Deployed Successfully!"
