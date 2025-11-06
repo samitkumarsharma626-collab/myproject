@@ -228,6 +228,10 @@ def register_balance_routes(app: FastAPI) -> None:
             available=True,
         )
 
+    @app.get("/api/balance", response_model=BalanceResponse)
+    async def get_balance(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
+        return await get_wallet_balance(settings)
+
     @app.get("/balance", response_model=BalanceResponse)
     async def get_balance_legacy(settings: AppSettings = Depends(get_app_settings)) -> BalanceResponse:
         return await get_wallet_balance(settings)

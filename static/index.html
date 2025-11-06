@@ -455,176 +455,205 @@
     </footer>
   </div>
 
-  <script>
-    (() => {
-      const REFRESH_INTERVAL_MS = 3000;
-      const DEFAULT_BALANCE = 10000;
-      const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
-      const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+    <script>
+      (() => {
+        const REFRESH_INTERVAL_MS = 3000;
+        const BALANCE_REFRESH_INTERVAL_MS = 30000;
+        const PRICE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+        const BALANCE_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+        const BALANCE_ENDPOINT = '/api/balance';
 
-      const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
-      const tabPanels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+        const tabButtons = Array.from(document.querySelectorAll('[role="tab"]'));
+        const tabPanels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
 
-      function showTab(targetId) {
-        tabButtons.forEach((btn) => {
-          const controls = btn.getAttribute('aria-controls');
-          const isActive = controls === targetId;
-          btn.setAttribute('aria-selected', String(isActive));
-          btn.setAttribute('tabindex', isActive ? '0' : '-1');
-          btn.classList.toggle('active', isActive);
+        function showTab(targetId) {
+          tabButtons.forEach((btn) => {
+            const controls = btn.getAttribute('aria-controls');
+            const isActive = controls === targetId;
+            btn.setAttribute('aria-selected', String(isActive));
+            btn.setAttribute('tabindex', isActive ? '0' : '-1');
+            btn.classList.toggle('active', isActive);
+          });
+
+          tabPanels.forEach((panel) => {
+            const shouldShow = panel.id === targetId;
+            panel.toggleAttribute('hidden', !shouldShow);
+          });
+        }
+
+        function focusNextTab(currentIndex, direction) {
+          const tabsCount = tabButtons.length;
+          let index = currentIndex;
+
+          do {
+            index = (index + direction + tabsCount) % tabsCount;
+          } while (tabButtons[index].hasAttribute('disabled') && index !== currentIndex);
+
+          tabButtons[index].focus();
+          showTab(tabButtons[index].getAttribute('aria-controls'));
+        }
+
+        tabButtons.forEach((button, index) => {
+          button.addEventListener('click', () => {
+            showTab(button.getAttribute('aria-controls'));
+          });
+
+          button.addEventListener('keydown', (event) => {
+            if (event.key === 'ArrowRight') {
+              event.preventDefault();
+              focusNextTab(index, 1);
+            } else if (event.key === 'ArrowLeft') {
+              event.preventDefault();
+              focusNextTab(index, -1);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              tabButtons[0].focus();
+              showTab(tabButtons[0].getAttribute('aria-controls'));
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              const lastTab = tabButtons[tabButtons.length - 1];
+              lastTab.focus();
+              showTab(lastTab.getAttribute('aria-controls'));
+            }
+          });
         });
 
-        tabPanels.forEach((panel) => {
-          const shouldShow = panel.id === targetId;
-          panel.toggleAttribute('hidden', !shouldShow);
-        });
-      }
+        showTab(tabButtons[0].getAttribute('aria-controls'));
 
-      function focusNextTab(currentIndex, direction) {
-        const tabsCount = tabButtons.length;
-        let index = currentIndex;
+        const getElement = (id) => document.getElementById(id);
 
-        do {
-          index = (index + direction + tabsCount) % tabsCount;
-        } while (tabButtons[index].hasAttribute('disabled') && index !== currentIndex);
-
-        tabButtons[index].focus();
-        showTab(tabButtons[index].getAttribute('aria-controls'));
-      }
-
-      tabButtons.forEach((button, index) => {
-        button.addEventListener('click', () => {
-          showTab(button.getAttribute('aria-controls'));
-        });
-
-        button.addEventListener('keydown', (event) => {
-          if (event.key === 'ArrowRight') {
-            event.preventDefault();
-            focusNextTab(index, 1);
-          } else if (event.key === 'ArrowLeft') {
-            event.preventDefault();
-            focusNextTab(index, -1);
-          } else if (event.key === 'Home') {
-            event.preventDefault();
-            tabButtons[0].focus();
-            showTab(tabButtons[0].getAttribute('aria-controls'));
-          } else if (event.key === 'End') {
-            event.preventDefault();
-            const lastTab = tabButtons[tabButtons.length - 1];
-            lastTab.focus();
-            showTab(lastTab.getAttribute('aria-controls'));
+        const formatNumeric = (value, options) => {
+          if (value === null || value === undefined || value === '') {
+            return '—';
           }
-        });
-      });
-
-      showTab(tabButtons[0].getAttribute('aria-controls'));
-
-      const getElement = (id) => document.getElementById(id);
-
-      const formatNumeric = (value, options) => {
-        if (value === null || value === undefined || value === '') {
-          return '—';
-        }
-        const numericValue = Number(value);
-        if (Number.isFinite(numericValue)) {
-          return numericValue.toLocaleString(undefined, options);
-        }
-        return String(value);
-      };
-
-      const setText = (id, value) => {
-        const element = getElement(id);
-        if (element) {
-          element.textContent = value ?? '—';
-        }
-      };
-
-      const ui = {
-        setPrice: (value) => setText('mPrice', formatNumeric(value, PRICE_FORMAT)),
-        setBalance: (value) => setText('mBalance', formatNumeric(value, BALANCE_FORMAT)),
-        setBox: (value) => setText('mBox', value),
-        setFilter: (id, value) => setText(id, value),
-        setTradeMetric: (id, value) => setText(id, value),
-        mockTick: () => {
-          const randomPrice = (Math.random() * 1000 + 4000).toFixed(2);
-          ui.setPrice(randomPrice);
-        },
-        mockSignal: (signal) => {
-          window.alert(`Mock ${signal} signal`);
-        },
-        resetAll: () => {
-          window.location.reload();
-        },
-      };
-
-      window.ui = ui;
-
-      const actionHandlers = {
-        'mock-tick': () => ui.mockTick(),
-        'mock-signal': (button) => {
-          const signal = button.getAttribute('data-signal') || '';
-          ui.mockSignal(signal);
-        },
-        reset: () => ui.resetAll(),
-      };
-
-      document.querySelectorAll('[data-action]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const actionName = button.getAttribute('data-action');
-          const handler = actionHandlers[actionName];
-          if (handler) {
-            handler(button);
+          const numericValue = Number(value);
+          if (Number.isFinite(numericValue)) {
+            return numericValue.toLocaleString(undefined, options);
           }
+          return String(value);
+        };
+
+        const setText = (id, value) => {
+          const element = getElement(id);
+          if (element) {
+            element.textContent = value ?? '—';
+          }
+        };
+
+        const ui = {
+          setPrice: (value) => setText('mPrice', formatNumeric(value, PRICE_FORMAT)),
+          setBalance: (value) => setText('mBalance', formatNumeric(value, BALANCE_FORMAT)),
+          setBox: (value) => setText('mBox', value),
+          setFilter: (id, value) => setText(id, value),
+          setTradeMetric: (id, value) => setText(id, value),
+          mockTick: () => {
+            const randomPrice = (Math.random() * 1000 + 4000).toFixed(2);
+            ui.setPrice(randomPrice);
+          },
+          mockSignal: (signal) => {
+            window.alert(`Mock ${signal} signal`);
+          },
+          resetAll: () => {
+            window.location.reload();
+          },
+        };
+
+        window.ui = ui;
+
+        const actionHandlers = {
+          'mock-tick': () => ui.mockTick(),
+          'mock-signal': (button) => {
+            const signal = button.getAttribute('data-signal') || '';
+            ui.mockSignal(signal);
+          },
+          reset: () => ui.resetAll(),
+        };
+
+        document.querySelectorAll('[data-action]').forEach((button) => {
+          button.addEventListener('click', () => {
+            const actionName = button.getAttribute('data-action');
+            const handler = actionHandlers[actionName];
+            if (handler) {
+              handler(button);
+            }
+          });
         });
-      });
 
-      const safeJsonFetch = async (endpoint) => {
-        const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
-        if (!response.ok) {
-          throw new Error(`Request failed with status ${response.status}`);
-        }
-        return response.json();
-      };
+        const safeJsonFetch = async (endpoint) => {
+          const response = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+          if (!response.ok) {
+            throw new Error(`Request failed with status ${response.status}`);
+          }
+          return response.json();
+        };
 
-      const refresh = async () => {
-        const requests = await Promise.allSettled([
-          safeJsonFetch('/price'),
-          safeJsonFetch('/box'),
-          safeJsonFetch('/strategy-filters'),
-        ]);
+        const refreshBalance = async ({ showLoading = false } = {}) => {
+          if (showLoading) {
+            setText('mBalance', 'Loading...');
+          }
 
-        const [priceResult, boxResult, filtersResult] = requests;
+          try {
+            const payload = await safeJsonFetch(BALANCE_ENDPOINT);
+            if (payload?.available) {
+              const formattedBalance = formatNumeric(payload?.balance, BALANCE_FORMAT);
+              const displayValue = formattedBalance === '—'
+                ? formattedBalance
+                : `${formattedBalance}${payload?.asset ? ` ${payload.asset}` : ''}`;
+              setText('mBalance', displayValue);
+            } else {
+              const fallback = payload?.message || 'Balance unavailable';
+              setText('mBalance', fallback);
+            }
+          } catch (error) {
+            console.error('Balance fetch failed', error);
+            setText('mBalance', 'Failed to load');
+          }
+        };
 
-        if (priceResult.status === 'fulfilled') {
-          ui.setPrice(priceResult.value?.price);
-        }
+        const refresh = async () => {
+          const requests = await Promise.allSettled([
+            safeJsonFetch('/price'),
+            safeJsonFetch('/box'),
+            safeJsonFetch('/strategy-filters'),
+          ]);
 
-        if (boxResult.status === 'fulfilled') {
-          ui.setBox(boxResult.value?.box ?? '—');
-        }
+          const [priceResult, boxResult, filtersResult] = requests;
 
-        if (filtersResult.status === 'fulfilled') {
-          const filters = filtersResult.value;
-          ui.setFilter('fRange', filters?.range ?? '—');
-          ui.setFilter('fAdx', filters?.adx_proxy ?? '—');
-          ui.setFilter('fAtr', filters?.atr_14 ?? '—');
-          ui.setFilter('fVol', filters?.volume_status ?? '—');
-          ui.setFilter('fTrend', filters?.one_hour_trend ?? '—');
-        }
-      };
+          if (priceResult.status === 'fulfilled') {
+            ui.setPrice(priceResult.value?.price);
+          }
 
-      ui.setBalance(DEFAULT_BALANCE);
+          if (boxResult.status === 'fulfilled') {
+            ui.setBox(boxResult.value?.box ?? '—');
+          }
 
-      refresh().catch((error) => {
-        console.error('Initial refresh failed', error);
-      });
+          if (filtersResult.status === 'fulfilled') {
+            const filters = filtersResult.value;
+            ui.setFilter('fRange', filters?.range ?? '—');
+            ui.setFilter('fAdx', filters?.adx_proxy ?? '—');
+            ui.setFilter('fAtr', filters?.atr_14 ?? '—');
+            ui.setFilter('fVol', filters?.volume_status ?? '—');
+            ui.setFilter('fTrend', filters?.one_hour_trend ?? '—');
+          }
+        };
 
-      setInterval(() => {
+        refreshBalance({ showLoading: true });
         refresh().catch((error) => {
-          console.error('Refresh failed', error);
+          console.error('Initial refresh failed', error);
         });
-      }, REFRESH_INTERVAL_MS);
-    })();
-  </script>
+
+        setInterval(() => {
+          refresh().catch((error) => {
+            console.error('Refresh failed', error);
+          });
+        }, REFRESH_INTERVAL_MS);
+
+        setInterval(() => {
+          refreshBalance().catch((error) => {
+            console.error('Balance refresh failed', error);
+          });
+        }, BALANCE_REFRESH_INTERVAL_MS);
+      })();
+    </script>
 </body>
 </html>
